@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest'
 import {
   AiSettingsSchema,
   AI_DEFAULT_MODEL,
+  collapseCarriageReturns,
+  fitTerminalContext,
   redactSecrets,
   tailLines,
+  trimConversation,
 } from './ai'
 
 describe('redactSecrets', () => {
@@ -76,6 +79,87 @@ describe('tailLines', () => {
 
   it('returns nothing when context sharing is turned off', () => {
     expect(tailLines('a\nb\nc', 0)).toBe('')
+  })
+})
+
+describe('collapseCarriageReturns', () => {
+  it('keeps only what a `\\r` sequence left on screen', () => {
+    expect(collapseCarriageReturns('10%\r50%\r100% done\nnext')).toBe('100% done\nnext')
+  })
+
+  it('leaves output without carriage returns untouched', () => {
+    expect(collapseCarriageReturns('a\nb\nc')).toBe('a\nb\nc')
+  })
+})
+
+describe('fitTerminalContext', () => {
+  // The failure this guards against is not degraded quality: Ollama drops a
+  // prompt that exceeds its window entirely — measured at 19 of ~7700 tokens
+  // evaluated — and the assistant then answers that it cannot see a terminal.
+  const lines = (count: number, width = 40) =>
+    Array.from({ length: count }, (_, i) => `line ${i} `.padEnd(width, 'x')).join('\n')
+
+  it('never exceeds the character budget', () => {
+    const fitted = fitTerminalContext(lines(500), { lines: 500, maxChars: 1000, redact: false })
+    expect(fitted.chars).toBeLessThanOrEqual(1000)
+    expect(fitted.truncated).toBe(true)
+  })
+
+  it('keeps the newest output when it has to cut', () => {
+    const fitted = fitTerminalContext(lines(500), { lines: 500, maxChars: 1000, redact: false })
+    expect(fitted.text).toContain('line 499')
+    expect(fitted.text).not.toContain('line 0 ')
+    expect(fitted.text).toContain('trimmed')
+  })
+
+  it('bounds a progress bar written with carriage returns and no newline', () => {
+    // One "line" by `tailLines`' reckoning, but 200 KB of it — this is how a
+    // 200-line context still overflowed the window.
+    const bar = Array.from({ length: 20_000 }, (_, i) => `\rDownloading ${i}%`).join('')
+    const fitted = fitTerminalContext(bar, { lines: 200, maxChars: 4000, redact: false })
+    expect(fitted.chars).toBeLessThanOrEqual(4000)
+    expect(fitted.text).toContain('Downloading 19999%')
+  })
+
+  it('reports not grounded when there is nothing to send', () => {
+    expect(fitTerminalContext('   \n  ', { lines: 200, maxChars: 5000, redact: false }).chars).toBe(0)
+    expect(fitTerminalContext(lines(10), { lines: 0, maxChars: 5000, redact: false }).chars).toBe(0)
+    expect(fitTerminalContext(lines(10), { lines: 200, maxChars: 0, redact: false }).chars).toBe(0)
+  })
+
+  it('redacts before measuring, so the budget covers what is actually sent', () => {
+    const fitted = fitTerminalContext('password=hunter2\nready', {
+      lines: 200,
+      maxChars: 5000,
+      redact: true,
+    })
+    expect(fitted.text).not.toContain('hunter2')
+    expect(fitted.chars).toBe(fitted.text.length)
+  })
+})
+
+describe('trimConversation', () => {
+  const turn = (role: 'user' | 'assistant', size: number) => ({ role, content: 'x'.repeat(size) })
+
+  it('drops the oldest turns first', () => {
+    const kept = trimConversation(
+      [turn('user', 100), turn('assistant', 100), turn('user', 100)],
+      250
+    )
+    expect(kept).toHaveLength(2)
+    expect(kept[kept.length - 1].content).toHaveLength(100)
+  })
+
+  it('always keeps the newest turn, even if it alone is over budget', () => {
+    // Dropping the question itself would be a worse failure than a tight fit.
+    const kept = trimConversation([turn('user', 100), turn('user', 5000)], 250)
+    expect(kept).toHaveLength(1)
+    expect(kept[0].content).toHaveLength(5000)
+  })
+
+  it('leaves a short conversation alone', () => {
+    const messages = [turn('user', 10), turn('assistant', 10)]
+    expect(trimConversation(messages, 1000)).toEqual(messages)
   })
 })
 

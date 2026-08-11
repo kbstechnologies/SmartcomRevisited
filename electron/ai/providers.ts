@@ -1,4 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
+import http from 'node:http'
+import https from 'node:https'
 import {
   AI_DEFAULT_BASE_URL,
   type AiChatMessage,
@@ -193,69 +195,172 @@ async function chatOpenAi(request: ChatRequest): Promise<ChatResult> {
  */
 export function ollamaContextWindow(system: string, messages: AiChatMessage[]): number {
   const chars = system.length + messages.reduce((total, m) => total + m.content.length, 0)
-  const needed = Math.ceil(chars / 3.5) + RESPONSE_HEADROOM_TOKENS
+  const needed = Math.ceil(chars / CHARS_PER_TOKEN) + RESPONSE_HEADROOM_TOKENS
   const rounded = Math.ceil(needed / 1024) * 1024
   return Math.min(OLLAMA_MAX_CONTEXT, Math.max(OLLAMA_MIN_CONTEXT, rounded))
 }
 
+/**
+ * Characters per token, used to size the window from the prompt.
+ *
+ * This has to be a *worst case*, not an average: under-estimating tokens sizes
+ * `num_ctx` too small, and a prompt that does not fit is discarded whole. The
+ * earlier value of 3.5 was an average for prose and was wrong for everything
+ * this app actually sends. Measured against llama3.1:
+ *
+ *   prose          4.96 chars/token
+ *   Cisco config   2.75
+ *   journalctl     2.49
+ *   hexdump        1.53   <- `cat` of a binary, base64 key material, packet dumps
+ *
+ * 1.5 covers the worst of those. Over-sizing costs KV cache memory, which is
+ * cheap; under-sizing costs the entire system prompt, which is the bug.
+ */
+const CHARS_PER_TOKEN = 1.5
 /** Room left for the answer on top of the prompt. */
 const RESPONSE_HEADROOM_TOKENS = 1024
 const OLLAMA_MIN_CONTEXT = 4096
-/** Above this, prefill on CPU gets painfully slow; better to cap than to hang. */
-const OLLAMA_MAX_CONTEXT = 32768
+/**
+ * KV cache for llama3.1-8B runs about 128 KB per token, so 16k tokens is ~2 GB
+ * — the point past which a laptop starts swapping. Prefill time is set by the
+ * prompt's real length rather than by the window, so this bound is about memory
+ * and the character budget below is what bounds the wait.
+ */
+const OLLAMA_MAX_CONTEXT = 16384
+
+/**
+ * How many characters of prompt a provider will actually read.
+ *
+ * Sizing `num_ctx` to the request is only half the fix — the window is capped,
+ * and a prompt past the cap is discarded exactly as before. The transcript is
+ * kept to 120,000 characters, well past any window here, so the caller must
+ * trim to this budget rather than assume the window can be grown to fit.
+ *
+ * For Ollama this is also the wait: prefill measured about 30 tokens/second on
+ * a CPU-only host, so ~23,000 characters of worst-case output is already a
+ * couple of minutes before the first word appears. Cutting it further would
+ * quietly answer from less of the screen than the operator asked for, so the
+ * budget stays and the panel reports what was sent instead.
+ *
+ * Anthropic and OpenAI have windows far larger than anything this app sends and
+ * error rather than truncating silently, so their budget only exists to keep a
+ * runaway console from turning into an expensive request.
+ */
+export function promptBudgetChars(provider: AiProvider): number {
+  if (provider === 'ollama') {
+    return Math.floor((OLLAMA_MAX_CONTEXT - RESPONSE_HEADROOM_TOKENS) * CHARS_PER_TOKEN)
+  }
+  return 400_000
+}
+
+/**
+ * Ollama goes over `node:http` rather than `fetch`, unlike the other providers.
+ *
+ * Ollama does not send response headers until generation actually starts, so
+ * the whole prefill happens before a single byte comes back — and undici (the
+ * fetch behind Node and Electron's main process) gives up after 300 seconds
+ * with `HeadersTimeoutError`. On a CPU-only host prefill measured about 30
+ * tokens/second, so an ordinary 200-line question crosses that line and the
+ * request dies with "fetch failed" after five minutes of waiting. `node:http`
+ * imposes no such deadline; cancellation is still the operator's Stop button.
+ */
+function ollamaChatStream(
+  url: string,
+  payload: string,
+  signal: AbortSignal,
+  onLine: (line: string) => void
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url)
+    const transport = target.protocol === 'https:' ? https : http
+
+    const request = transport.request(
+      target,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(payload),
+        },
+      },
+      (response) => {
+        const status = response.statusCode ?? 0
+
+        if (status < 200 || status >= 300) {
+          let body = ''
+          response.setEncoding('utf8')
+          response.on('data', (chunk: string) => {
+            body += chunk
+          })
+          response.on('end', () =>
+            reject(
+              new Error(
+                `Ollama request failed (${status}): ${body.slice(0, 400) || response.statusMessage}`
+              )
+            )
+          )
+          return
+        }
+
+        // Ollama streams bare NDJSON rather than SSE, so it is read line by line.
+        let buffer = ''
+        response.setEncoding('utf8')
+        response.on('data', (chunk: string) => {
+          buffer += chunk
+          let newline = buffer.indexOf('\n')
+          while (newline !== -1) {
+            const line = buffer.slice(0, newline).trim()
+            buffer = buffer.slice(newline + 1)
+            if (line) onLine(line)
+            newline = buffer.indexOf('\n')
+          }
+        })
+        response.on('end', () => {
+          if (buffer.trim()) onLine(buffer.trim())
+          resolve()
+        })
+        response.on('error', reject)
+      }
+    )
+
+    // Stop is an abort, and the caller treats it as a normal end of turn.
+    const abort = () => request.destroy(new Error('aborted'))
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
+
+    request.on('error', reject)
+    request.end(payload)
+  })
+}
 
 async function chatOllama(request: ChatRequest): Promise<ChatResult> {
   const { settings, system, messages, signal, onDelta } = request
 
-  const response = await fetch(`${baseUrlFor(settings).replace(/\/$/, '')}/api/chat`, {
-    method: 'POST',
-    signal,
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      model: settings.model,
-      stream: true,
-      messages: [{ role: 'system', content: system }, ...messages],
-      options: { num_ctx: ollamaContextWindow(system, messages) },
-    }),
+  const payload = JSON.stringify({
+    model: settings.model,
+    stream: true,
+    messages: [{ role: 'system', content: system }, ...messages],
+    options: { num_ctx: ollamaContextWindow(system, messages) },
   })
 
-  await assertOk(response, 'Ollama')
+  let finished = false
 
-  // Ollama streams bare NDJSON rather than SSE, so it is read line by line.
-  const reader = response.body?.getReader()
-  if (!reader) throw new Error('Ollama response had no body')
-
-  const decoder = new TextDecoder()
-  let buffer = ''
-
-  try {
-    while (!signal.aborted) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      let newline = buffer.indexOf('\n')
-
-      while (newline !== -1) {
-        const line = buffer.slice(0, newline).trim()
-        buffer = buffer.slice(newline + 1)
-
-        if (line) {
-          try {
-            const parsed = JSON.parse(line)
-            const delta = parsed.message?.content
-            if (typeof delta === 'string' && delta) onDelta(delta)
-            if (parsed.done) return { model: settings.model }
-          } catch {
-            /* partial line */
-          }
-        }
-        newline = buffer.indexOf('\n')
+  await ollamaChatStream(
+    `${baseUrlFor(settings).replace(/\/$/, '')}/api/chat`,
+    payload,
+    signal,
+    (line) => {
+      if (finished) return
+      try {
+        const parsed = JSON.parse(line)
+        const delta = parsed.message?.content
+        if (typeof delta === 'string' && delta) onDelta(delta)
+        if (parsed.done) finished = true
+      } catch {
+        /* partial or keep-alive line */
       }
     }
-  } finally {
-    reader.cancel().catch(() => undefined)
-  }
+  )
 
   return { model: settings.model }
 }

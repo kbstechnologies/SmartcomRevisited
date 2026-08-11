@@ -71,6 +71,8 @@ export interface AssistantTurn extends AiChatMessage {
   /** Set while the assistant's reply is still streaming in. */
   streaming?: boolean
   error?: string
+  /** What this answer was grounded in, reported by the main process. */
+  context?: AiContextReport
 }
 
 /** What the renderer sends when asking a question about a session. */
@@ -86,14 +88,32 @@ export const AiAskSchema = z.object({
 
 export type AiAsk = z.infer<typeof AiAskSchema>
 
+/**
+ * What was actually attached to the request. Reported to the renderer so the
+ * operator can see the assistant is grounded instead of having to infer it
+ * from the answer — a model given no context does not reliably say so.
+ */
+export interface AiContextReport {
+  /** False when no session was in focus, or the context provider had nothing. */
+  grounded: boolean
+  lines: number
+  chars: number
+  /** Output had to be cut to fit the model's window. */
+  truncated: boolean
+  commands: number
+  buttons: number
+}
+
 /** Streamed back to the renderer as the answer is generated. */
 export interface AiStreamEvent {
   requestId: string
-  type: 'delta' | 'done' | 'error' | 'refusal'
+  type: 'delta' | 'done' | 'error' | 'refusal' | 'context'
   text?: string
   error?: string
   /** Model that actually served the response (may differ after a fallback). */
   model?: string
+  /** Present on `context`, emitted once before the first delta. */
+  context?: AiContextReport
 }
 
 // ---------------------------------------------------------------------------
@@ -139,4 +159,111 @@ export function tailLines(text: string, lines: number): string {
   if (lines <= 0) return ''
   const split = text.split('\n')
   return split.length <= lines ? text : split.slice(-lines).join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// Fitting the terminal into the model's context window
+// ---------------------------------------------------------------------------
+
+/**
+ * Collapses carriage returns the way the screen does: everything before the
+ * last `\r` on a line was overwritten and is not what the operator is looking
+ * at.
+ *
+ * This is a size fix as much as a fidelity one. `tailLines` counts `\n`, but a
+ * progress bar, a `top` refresh or a serial console that pads with `\r` emits
+ * *one* line that can run to hundreds of kilobytes — so a 200-line context
+ * could still be far larger than any model's window.
+ */
+export function collapseCarriageReturns(text: string): string {
+  if (!text.includes('\r')) return text
+  return text
+    .split('\n')
+    .map((line) => {
+      const last = line.lastIndexOf('\r')
+      return last === -1 ? line : line.slice(last + 1)
+    })
+    .join('\n')
+}
+
+/**
+ * Drops the oldest turns until the conversation fits `maxChars`.
+ *
+ * The prompt budget is shared between the chat and the terminal context, so a
+ * long conversation would otherwise crowd out the very output the questions are
+ * about — the assistant would go blind partway through a session rather than
+ * all at once, which is harder to notice. The newest turn is always kept, even
+ * if it alone exceeds the budget: dropping the actual question would be worse
+ * than a tight fit.
+ */
+export function trimConversation(messages: AiChatMessage[], maxChars: number): AiChatMessage[] {
+  if (messages.length === 0) return messages
+
+  const kept: AiChatMessage[] = []
+  let used = 0
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    const cost = message.content.length
+    if (kept.length > 0 && used + cost > maxChars) break
+    kept.unshift(message)
+    used += cost
+  }
+
+  return kept
+}
+
+/** Marks where output was dropped, so the model knows it is seeing a tail. */
+const TRIM_NOTICE = '[… earlier output trimmed to fit the model context window …]\n'
+
+export interface FittedContext {
+  text: string
+  lines: number
+  chars: number
+  /** True when the line budget was not the binding constraint — size was. */
+  truncated: boolean
+}
+
+/**
+ * Produces the terminal block that goes into the prompt, guaranteed to fit in
+ * `maxChars`.
+ *
+ * Overflowing the window is not a graceful degradation: Ollama silently drops
+ * whatever does not fit, oldest first, and the system prompt goes with it — the
+ * assistant then answers that it cannot see any terminal. Measured on llama3.1,
+ * a 27,000-character prompt against a 4,096-token window evaluated **19** of
+ * its tokens. So the content is trimmed to the budget here rather than left for
+ * the provider to discard.
+ */
+export function fitTerminalContext(
+  raw: string,
+  options: { lines: number; maxChars: number; redact: boolean }
+): FittedContext {
+  const empty: FittedContext = { text: '', lines: 0, chars: 0, truncated: false }
+  if (options.lines <= 0 || options.maxChars <= 0) return empty
+
+  const collapsed = collapseCarriageReturns(raw)
+  let body = tailLines(collapsed, options.lines).trimEnd()
+  // Redaction runs before the size check: it can only shrink the text, and a
+  // budget measured on unredacted output would be wrong in the safe direction
+  // but wasteful.
+  if (options.redact) body = redactSecrets(body)
+  if (!body.trim()) return empty
+
+  let truncated = false
+  if (body.length > options.maxChars) {
+    truncated = true
+    const room = Math.max(0, options.maxChars - TRIM_NOTICE.length)
+    const cut = body.slice(-room)
+    // Start at a line boundary so the first line is not a fragment.
+    const newline = cut.indexOf('\n')
+    body = TRIM_NOTICE + (newline === -1 ? cut : cut.slice(newline + 1))
+  }
+
+  return {
+    text: body,
+    lines: body ? body.split('\n').length : 0,
+    chars: body.length,
+    truncated,
+  }
 }

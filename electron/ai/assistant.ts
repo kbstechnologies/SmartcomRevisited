@@ -1,10 +1,11 @@
 import { EventEmitter } from 'events'
-import { chat } from './providers'
+import { chat, promptBudgetChars } from './providers'
 import {
   AiSettingsSchema,
-  redactSecrets,
-  tailLines,
+  fitTerminalContext,
+  trimConversation,
   type AiAsk,
+  type AiContextReport,
   type AiSettings,
 } from '../../src/shared/ai'
 import type { Profile } from '../../src/shared/types'
@@ -36,6 +37,31 @@ Mark any command that changes configuration or state clearly as a change, separa
 
 Keep answers short and concrete. Lead with the answer, then the reasoning. Use a fenced code block for commands, one command per line.`
 
+/**
+ * Told to the model when there is nothing to ground on.
+ *
+ * A model handed no context does not reliably admit it — llama3.1 given only
+ * the base prompt invented a serial session, a tab that does not exist and a
+ * command for it. Saying so explicitly is cheaper than letting the operator
+ * act on a fabricated screen.
+ */
+const UNGROUNDED_NOTE = `
+
+## No connection context was attached to this question
+You have NOT been given any terminal output, host details, or command history for this request — either no session is in focus or context sharing is switched off. Do not describe or guess at what is on the operator's screen. Say plainly that you cannot see a session, and answer only from general knowledge.`
+
+/** Same, but a session *is* in focus and its output happens to be empty. */
+const NO_OUTPUT_NOTE = `### Recent terminal output
+There is none yet — the session is connected but has produced no output, or output sharing is set to 0 lines. Do not invent what is on screen.`
+
+/** Guard rails on the parts of the prompt that would otherwise be unbounded. */
+const MAX_BUTTONS = 60
+const MAX_COMMANDS = 40
+/** Most the chat history may take, leaving the rest for the screen. */
+const CONVERSATION_SHARE = 0.35
+/** The fences and newlines wrapped around the terminal block. */
+const FENCE_CHARS = 16
+
 const MODE_FRAMING: Record<AiAsk['mode'], string> = {
   ask: '',
   explain:
@@ -65,12 +91,34 @@ export class Assistant extends EventEmitter {
     this.inFlight.clear()
   }
 
-  /** Builds the grounding block appended to the system prompt. */
-  private buildContext(settings: AiSettings, sessionId?: string): string {
-    if (!sessionId || !this.contextProvider) return ''
+  /**
+   * Builds the grounding block appended to the system prompt, sized so the
+   * whole prompt fits the provider's window.
+   *
+   * `budgetChars` is what the *entire* prompt may occupy; everything except the
+   * terminal output is assembled first and the remainder is what the terminal
+   * gets. Overflowing is not survivable — Ollama drops the oldest content
+   * without saying so, which is the system prompt, and the assistant then
+   * replies that it cannot see a terminal.
+   */
+  private buildContext(
+    settings: AiSettings,
+    budgetChars: number,
+    sessionId?: string
+  ): { text: string; report: AiContextReport } {
+    const none: AiContextReport = {
+      grounded: false,
+      lines: 0,
+      chars: 0,
+      truncated: false,
+      commands: 0,
+      buttons: 0,
+    }
+
+    if (!sessionId || !this.contextProvider) return { text: UNGROUNDED_NOTE, report: none }
 
     const context = this.contextProvider(sessionId)
-    if (!context) return ''
+    if (!context) return { text: UNGROUNDED_NOTE, report: none }
 
     const { profile } = context
     const parts: string[] = ['\n\n## The connection you are being asked about']
@@ -88,29 +136,53 @@ export class Assistant extends EventEmitter {
       )
     }
 
-    if (context.availableButtons.length > 0) {
+    // The button list is unbounded — a user with many sets could otherwise
+    // spend the whole budget describing buttons instead of showing output.
+    const buttons = context.availableButtons.slice(0, MAX_BUTTONS)
+    if (buttons.length > 0) {
       parts.push(
         '\n### Buttons already configured (prefer these over new commands)\n' +
-          context.availableButtons
+          buttons
             .map((button) => `- ${button.set} › ${button.name}${button.description ? ` — ${button.description}` : ''}`)
             .join('\n')
       )
     }
 
-    if (settings.includeCommandHistory && context.recentCommands.length > 0) {
+    const commands = settings.includeCommandHistory
+      ? context.recentCommands.slice(-MAX_COMMANDS)
+      : []
+    if (commands.length > 0) {
       parts.push(
         '\n### Commands previously run on this connection (ground truth for what this box accepts)\n' +
-          context.recentCommands.slice(-40).map((command) => `- ${command}`).join('\n')
+          commands.map((command) => `- ${command}`).join('\n')
       )
     }
 
-    if (settings.contextLines > 0 && context.recentOutput.trim()) {
-      const tail = tailLines(context.recentOutput, settings.contextLines)
-      const body = settings.redactSecrets ? redactSecrets(tail) : tail
-      parts.push(`\n### Recent terminal output\n\`\`\`\n${body.trimEnd()}\n\`\`\``)
-    }
+    const fixed = parts.join('\n')
+    const heading = '\n\n### Recent terminal output (this is what is on the operator\'s screen)\n'
+    const overhead = fixed.length + heading.length + FENCE_CHARS
 
-    return parts.join('\n')
+    const fitted = fitTerminalContext(context.recentOutput, {
+      lines: settings.contextLines,
+      maxChars: Math.max(0, budgetChars - overhead),
+      redact: settings.redactSecrets,
+    })
+
+    const text = fitted.text
+      ? `${fixed}${heading}\`\`\`\n${fitted.text}\n\`\`\``
+      : `${fixed}\n\n${NO_OUTPUT_NOTE}`
+
+    return {
+      text,
+      report: {
+        grounded: fitted.chars > 0,
+        lines: fitted.lines,
+        chars: fitted.chars,
+        truncated: fitted.truncated,
+        commands: commands.length,
+        buttons: buttons.length,
+      },
+    }
   }
 
   /**
@@ -133,15 +205,28 @@ export class Assistant extends EventEmitter {
     const controller = new AbortController()
     this.inFlight.set(ask.requestId, controller)
 
-    const system =
-      BASE_SYSTEM + MODE_FRAMING[ask.mode] + this.buildContext(settings, ask.sessionId)
+    // The prompt budget is split between the conversation and the terminal
+    // context. The context gets the larger share on purpose: an assistant that
+    // has forgotten an earlier turn is still useful, one that cannot see the
+    // screen is not — and that is the failure the operator actually hit.
+    const framing = BASE_SYSTEM + MODE_FRAMING[ask.mode]
+    const total = promptBudgetChars(settings.provider) - framing.length
+    const messages = trimConversation(ask.messages, Math.floor(total * CONVERSATION_SHARE))
+    const used = messages.reduce((sum, message) => sum + message.content.length, 0)
+
+    const { text: context, report } = this.buildContext(settings, total - used, ask.sessionId)
+    const system = framing + context
+
+    // Sent before the first token so the panel can show what the answer is
+    // based on, rather than leaving the operator to trust the model's word.
+    this.emit('stream', { requestId: ask.requestId, type: 'context', context: report })
 
     try {
       const result = await chat({
         settings,
         apiKey,
         system,
-        messages: ask.messages,
+        messages,
         signal: controller.signal,
         onDelta: (text) => {
           this.emit('stream', { requestId: ask.requestId, type: 'delta', text })

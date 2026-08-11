@@ -397,15 +397,20 @@ const useStore = create<AppStore>((set, get) => ({
 
       if (event.type === 'delta') {
         turns[turns.length - 1] = { ...last, content: last.content + (event.text ?? '') }
+      } else if (event.type === 'context') {
+        // Arrives before the first token and does not end the turn.
+        turns[turns.length - 1] = { ...last, context: event.context }
       } else if (event.type === 'error' || event.type === 'refusal') {
         turns[turns.length - 1] = { ...last, streaming: false, error: event.error }
       } else {
         turns[turns.length - 1] = { ...last, streaming: false }
       }
 
+      const stillRunning = event.type === 'delta' || event.type === 'context'
+
       return {
         assistantTurns: turns,
-        assistantRequestId: event.type === 'delta' ? state.assistantRequestId : null,
+        assistantRequestId: stillRunning ? state.assistantRequestId : null,
       }
     }),
 

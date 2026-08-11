@@ -12,7 +12,23 @@ import {
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
 import { useStore } from '../store/useStore'
-import type { AiChatMessage, AiSettings } from '@shared/ai'
+import {
+  AI_DEFAULT_BASE_URL,
+  AI_DEFAULT_MODEL,
+  AI_MODEL_SUGGESTIONS,
+  AI_PROVIDERS,
+  type AiChatMessage,
+  type AiContextReport,
+  type AiProvider,
+  type AiSettings,
+} from '@shared/ai'
+
+/** Short enough for the panel header, which is only as wide as the side panel. */
+const PROVIDER_LABEL: Record<AiProvider, string> = {
+  anthropic: 'Claude',
+  openai: 'OpenAI',
+  ollama: 'Ollama (local)',
+}
 
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
 
@@ -39,7 +55,74 @@ function segments(text: string): Array<{ type: 'text' | 'code'; body: string }> 
   return parts.filter((part) => part.body.trim().length > 0)
 }
 
-export default function AssistantPanel({ onOpenSettings }: { onOpenSettings: () => void }) {
+/**
+ * "Thinking…" with a clock on it.
+ *
+ * A local model has to read the whole terminal context before it emits a single
+ * token — measured at roughly 30 tokens/second on a CPU-only host, so a normal
+ * 200-line question is minutes of silence. Without the elapsed count that is
+ * indistinguishable from a hang.
+ */
+function Thinking({ local }: { local: boolean }) {
+  const [seconds, setSeconds] = useState(0)
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  return (
+    <p className="text-xs text-gray-500 italic">
+      Thinking… {seconds}s
+      {local && seconds > 15 && (
+        <span className="not-italic text-gray-600">
+          {' '}
+          — a local model reads the whole context before it answers.
+        </span>
+      )}
+    </p>
+  )
+}
+
+/**
+ * One line saying what the answer was actually based on.
+ *
+ * Worth the space: a model that was handed no terminal output does not reliably
+ * say so — it either claims it cannot see a terminal (which reads as the app
+ * being broken) or invents a screen. This makes the difference visible without
+ * having to trust the answer.
+ */
+function ContextBadge({ context }: { context: AiContextReport }) {
+  if (!context.grounded) {
+    return (
+      <p className="text-[10px] text-amber-500/80 mb-1">
+        No terminal output was attached — the answer is from general knowledge only.
+      </p>
+    )
+  }
+
+  const kb = context.chars >= 1024 ? `${Math.round(context.chars / 1024)} KB` : `${context.chars} B`
+
+  return (
+    <p className="text-[10px] text-gray-600 mb-1">
+      Saw {context.lines} lines ({kb})
+      {context.commands > 0 && ` · ${context.commands} past commands`}
+      {context.buttons > 0 && ` · ${context.buttons} buttons`}
+      {context.truncated && (
+        <span className="text-amber-500/80"> · trimmed to fit the model window</span>
+      )}
+    </p>
+  )
+}
+
+interface AssistantPanelProps {
+  onOpenSettings: () => void
+  /** The settings dialog renders beside this panel rather than replacing it,
+   *  so the header has to re-read its config when the dialog closes. */
+  settingsOpen: boolean
+}
+
+export default function AssistantPanel({ onOpenSettings, settingsOpen }: AssistantPanelProps) {
   const activeSessionId = useStore((state) => state.activeSessionId)
   const sessions = useStore((state) => state.sessions)
   const sendToSession = useStore((state) => state.sendToSession)
@@ -58,19 +141,45 @@ export default function AssistantPanel({ onOpenSettings }: { onOpenSettings: () 
   const activeRequest = useStore((state) => state.assistantRequestId)
   const setActiveRequest = useStore((state) => state.setAssistantRequestId)
 
+  const saveAiSettings = useStore((state) => state.saveAiSettings)
+
   const [settings, setSettings] = useState<AiSettings | null>(null)
   const [keyMissing, setKeyMissing] = useState(false)
+  /** Models installed in Ollama, so the picker offers what is actually there. */
+  const [localModels, setLocalModels] = useState<string[]>([])
+  const [ollamaError, setOllamaError] = useState<string | null>(null)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const activeSession = sessions.find((session) => session.id === activeSessionId)
 
-  const refreshConfig = async () => {
+  /**
+   * Ollama needs no key but does need to be running, and an unreachable daemon
+   * otherwise only shows up as a failed request after the question is typed.
+   */
+  const probeOllama = async () => {
+    const response = await window.electronAPI.invoke<{ models: string[] }>('ai:list-models')
+    if (response.success) {
+      setLocalModels(response.data?.models ?? [])
+      setOllamaError(
+        (response.data?.models ?? []).length === 0
+          ? 'Ollama is running but has no models installed (try `ollama pull llama3.1`).'
+          : null
+      )
+    } else {
+      setLocalModels([])
+      setOllamaError(response.error ?? 'Could not reach Ollama on this machine.')
+    }
+  }
+
+  const refreshConfig = async (loadedSettings?: AiSettings) => {
     try {
-      const loaded = await loadAiSettings()
+      const loaded = loadedSettings ?? (await loadAiSettings())
       setSettings(loaded)
       if (loaded.provider === 'ollama') {
         setKeyMissing(false)
+        await probeOllama()
       } else {
+        setOllamaError(null)
         const status = await aiKeyStatus()
         setKeyMissing(!status[loaded.provider])
       }
@@ -80,9 +189,39 @@ export default function AssistantPanel({ onOpenSettings }: { onOpenSettings: () 
   }
 
   useEffect(() => {
+    if (settingsOpen) return
     void refreshConfig()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [settingsOpen])
+
+  /**
+   * Switching provider resets model and endpoint together — the combination is
+   * never valid across providers, and leaving a Claude model pointed at the
+   * Ollama endpoint is a confusing way to fail.
+   */
+  const changeProvider = async (provider: AiProvider) => {
+    const saved = await saveAiSettings({
+      provider,
+      model: AI_DEFAULT_MODEL[provider],
+      baseUrl: AI_DEFAULT_BASE_URL[provider],
+    })
+    await refreshConfig(saved)
+  }
+
+  const changeModel = async (model: string) => {
+    setSettings(await saveAiSettings({ model }))
+  }
+
+  const modelOptions = useMemo(() => {
+    if (!settings) return []
+    const base =
+      settings.provider === 'ollama' && localModels.length > 0
+        ? localModels
+        : AI_MODEL_SUGGESTIONS[settings.provider]
+    // The user may have typed something custom in the settings dialog; keep it
+    // selectable rather than silently switching them to a suggestion.
+    return base.includes(settings.model) ? base : [settings.model, ...base]
+  }, [settings, localModels])
 
   // Deltas are folded into the conversation by the app-level 'ai-stream'
   // listener in App.tsx, so a reply keeps arriving while this panel is
@@ -133,19 +272,46 @@ export default function AssistantPanel({ onOpenSettings }: { onOpenSettings: () 
     }
   }
 
-  const providerLabel = useMemo(() => {
-    if (!settings) return 'not configured'
-    return `${settings.provider} · ${settings.model}`
-  }, [settings])
-
   const canSend = Boolean(settings) && !keyMissing && !activeRequest
+
+  const selectClass =
+    'min-w-0 rounded bg-gray-800 border border-gray-600 text-[11px] text-gray-200 px-1 py-0.5 ' +
+    'focus:outline-none focus:ring-1 focus:ring-blue-500 hover:border-gray-500'
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-2 px-2 py-1.5 border-b border-gray-700">
-        <span className="text-xs text-gray-400 truncate flex-1" title={providerLabel}>
-          {providerLabel}
-        </span>
+      <div className="flex items-center gap-1 px-2 py-1.5 border-b border-gray-700">
+        {/* Provider and model switch here rather than only in the settings
+            dialog: trying a question against a local model and then against
+            Claude is a normal thing to do mid-conversation. */}
+        <select
+          value={settings?.provider ?? 'anthropic'}
+          onChange={(event) => void changeProvider(event.target.value as AiProvider)}
+          disabled={!settings || Boolean(activeRequest)}
+          title="AI provider"
+          className={`${selectClass} shrink-0 disabled:opacity-50`}
+        >
+          {AI_PROVIDERS.map((provider) => (
+            <option key={provider} value={provider}>
+              {PROVIDER_LABEL[provider]}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={settings?.model ?? ''}
+          onChange={(event) => void changeModel(event.target.value)}
+          disabled={!settings || Boolean(activeRequest)}
+          title={settings ? `Model: ${settings.model}` : 'Model'}
+          className={`${selectClass} flex-1 disabled:opacity-50`}
+        >
+          {modelOptions.map((model) => (
+            <option key={model} value={model}>
+              {model}
+            </option>
+          ))}
+        </select>
+
         <button
           onClick={onOpenSettings}
           title="Assistant settings"
@@ -172,6 +338,18 @@ export default function AssistantPanel({ onOpenSettings }: { onOpenSettings: () 
               Add one
             </button>{' '}
             — or switch to Ollama to run locally.
+          </span>
+        </div>
+      )}
+
+      {ollamaError && (
+        <div className="flex items-start gap-2 px-3 py-2 bg-amber-950/40 border-b border-amber-900 text-[11px] text-amber-200">
+          <ExclamationTriangleIcon className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>
+            {ollamaError}{' '}
+            <button onClick={() => void probeOllama()} className="underline hover:text-amber-100">
+              Retry
+            </button>
           </span>
         </div>
       )}
@@ -222,6 +400,7 @@ export default function AssistantPanel({ onOpenSettings }: { onOpenSettings: () 
               </div>
             ) : (
               <div className="space-y-2">
+                {turn.context && <ContextBadge context={turn.context} />}
                 {segments(turn.content).map((segment, i) =>
                   segment.type === 'code' ? (
                     <div key={i} className="rounded border border-gray-600 overflow-hidden">
@@ -260,7 +439,7 @@ export default function AssistantPanel({ onOpenSettings }: { onOpenSettings: () 
                 )}
 
                 {turn.streaming && turn.content.length === 0 && (
-                  <p className="text-xs text-gray-500 italic">Thinking…</p>
+                  <Thinking local={settings?.provider === 'ollama'} />
                 )}
                 {turn.error && <p className="text-xs text-red-400">{turn.error}</p>}
               </div>

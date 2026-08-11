@@ -202,7 +202,10 @@ export default function Layout() {
               {sidePanel === 'buttons' ? (
                 <MacroPanel />
               ) : (
-                <AssistantPanel onOpenSettings={() => setShowAssistantSettings(true)} />
+                <AssistantPanel
+                  onOpenSettings={() => setShowAssistantSettings(true)}
+                  settingsOpen={showAssistantSettings}
+                />
               )}
             </div>
           )}
