@@ -1,0 +1,147 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Terminal styles.
+   Padding goes on the wrapper, never on .xterm itself: FitAddon measures the
+   .xterm element to derive cols/rows, so padding there makes it overestimate
+   and the last rows/columns get clipped out of view. */
+.terminal-pane {
+  padding: 6px;
+  background: #1e1e1e;
+  overflow: hidden;
+}
+
+.terminal-pane .xterm,
+.terminal-pane .xterm-screen {
+  height: 100%;
+}
+
+/* Custom scrollbar */
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 4px;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+/* Dark theme base */
+body {
+  @apply bg-gray-900 text-gray-100;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Input focus styles */
+input:focus, textarea:focus, select:focus {
+  @apply outline-none ring-2 ring-blue-500;
+}
+
+/* Button styles */
+.btn {
+  @apply px-3 py-1.5 rounded-md font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2;
+}
+
+.btn-primary {
+  @apply bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-500;
+}
+
+.btn-secondary {
+  @apply bg-gray-600 text-white hover:bg-gray-700 focus:ring-gray-500;
+}
+
+.btn-danger {
+  @apply bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+}
+
+.btn-sm {
+  @apply px-2 py-1 text-sm;
+}
+
+/* Tab styles */
+.tab {
+  @apply px-3 py-2 text-sm rounded-t-md border-b-2 border-transparent transition-colors;
+}
+
+.tab-active {
+  @apply bg-gray-800 border-blue-500 text-blue-400;
+}
+
+.tab-inactive {
+  @apply hover:bg-gray-700 hover:text-gray-200;
+}
+
+/* Panel styles */
+.panel {
+  @apply bg-gray-800 border border-gray-700 rounded-lg;
+}
+
+.panel-header {
+  @apply px-4 py-2 border-b border-gray-700 font-medium;
+}
+
+/* Form styles */
+.form-group {
+  @apply mb-4;
+}
+
+.form-label {
+  @apply block text-sm font-medium mb-1;
+}
+
+.form-input {
+  @apply w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400;
+}
+
+.form-select {
+  @apply w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white;
+}
+
+/* Status indicators */
+.status-dot {
+  @apply inline-block w-2 h-2 rounded-full;
+}
+
+.status-connected {
+  @apply bg-green-500;
+}
+
+.status-connecting {
+  @apply bg-yellow-500 animate-pulse;
+}
+
+.status-disconnected {
+  @apply bg-gray-500;
+}
+
+.status-error {
+  @apply bg-red-500;
+}
+
+/* Macro button styles */
+.macro-button {
+  @apply w-full px-3 py-2 text-left rounded-md bg-gray-700 hover:bg-gray-600 border border-gray-600 transition-colors;
+}
+
+.macro-button:hover {
+  @apply border-blue-500;
+}
+
+/* Command palette */
+.command-palette-backdrop {
+  @apply fixed inset-0 bg-black bg-opacity-50 z-50;
+}
+
+.command-palette {
+  @apply bg-gray-800 border border-gray-600 rounded-lg shadow-xl max-w-2xl mx-auto mt-32;
+}

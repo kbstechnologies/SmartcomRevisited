@@ -1,0 +1,271 @@
+{
+  "name": "smartcom-revisited",
+  "productName": "Smartcom Revisited",
+  "version": "1.0.0",
+  "description": "Cross-platform SSH terminal with macro buttons and logging",
+  "author": {
+    "name": "Smartcom Revisited Project",
+    "email": "info@kbstech.com"
+  },
+  "homepage": "https://github.com/kbstechnologies/SmartcomRevisited",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kbstechnologies/SmartcomRevisited.git"
+  },
+  "license": "MIT",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "preinstall": "node scripts/fix-windows.js || echo 'Fix script not found, continuing...'",
+    "dev": "concurrently \"npm run dev:vite\" \"npm run dev:electron\"",
+    "dev:vite": "vite --port 5273 --strictPort",
+    "dev:electron": "wait-on tcp:127.0.0.1:5273 && electron .",
+    "build": "npm run build:renderer && npm run build:electron",
+    "build:renderer": "vite build -c vite.renderer.config.ts",
+    "build:main": "vite build -c vite.main.config.ts",
+    "build:preload": "vite build -c vite.preload.config.ts",
+    "build:electron": "npm run build:main && npm run build:preload",
+    "package": "npm run build && electron-builder -p never",
+    "package:win": "npm run build && electron-builder --win -p never",
+    "package:mac": "npm run build && electron-builder --mac -p never",
+    "package:linux": "npm run build && electron-builder --linux -p never",
+    "package:all": "npm run build && electron-builder --win --mac --linux -p never",
+    "dist": "npm run package",
+    "lint": "eslint src --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig-electron.json",
+    "test": "vitest run",
+    "migrate": "npm run build:electron && node dist-electron/migrate.js",
+    "clean": "rimraf dist dist-electron release node_modules/.vite",
+    "rebuild": "npm run clean && npm install",
+    "fix-windows": "node scripts/fix-windows.js",
+    "rebuild:native": "electron-rebuild -f -w better-sqlite3",
+    "postinstall": "npm run fix-windows && electron-builder install-app-deps",
+    "test:watch": "vitest",
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run test:db && npm run build",
+    "testserver:up": "docker compose -f test-server/docker-compose.yml up -d --build",
+    "testserver:down": "docker compose -f test-server/docker-compose.yml down",
+    "test:integration": "vitest run electron/key-manager.integration.test.ts",
+    "brand": "node scripts/prepare-brand.js",
+    "test:db": "vite build -c vite.dbsmoke.config.ts && node -e \"require('fs').writeFileSync('dist-smoke/package.json','{\\\"name\\\":\\\"dbsmoke\\\",\\\"main\\\":\\\"db-smoke.js\\\"}')\" && electron dist-smoke"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/node": "^20.10.5",
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "@types/ssh2": "^1.15.5",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.16",
+    "concurrently": "^8.2.2",
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1",
+    "electron-notarize": "^1.2.2",
+    "eslint": "^8.56.0",
+    "eslint-plugin-react": "^7.33.2",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "postcss": "^8.4.32",
+    "prettier": "^3.1.1",
+    "rimraf": "^5.0.5",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.10",
+    "vitest": "^1.1.0",
+    "wait-on": "^7.2.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
+    "@electron/remote": "^2.1.2",
+    "@headlessui/react": "^1.7.17",
+    "@heroicons/react": "^2.0.18",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/xterm": "^5.3.0",
+    "better-sqlite3": "^9.6.0",
+    "clsx": "^2.0.0",
+    "drizzle-orm": "^0.29.1",
+    "electron-updater": "^6.1.7",
+    "node-ssh": "^13.2.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-hotkeys-hook": "^4.4.4",
+    "serialport": "^12.0.0",
+    "ssh2": "^1.15.0",
+    "zod": "^3.22.4",
+    "zustand": "^4.4.7"
+  },
+  "build": {
+    "appId": "com.smartcomrevisited.app",
+    "productName": "SmartcomRevisited",
+    "copyright": "Copyright © 2026 Smartcom Revisited",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "kbstechnologies",
+        "repo": "SmartcomRevisited"
+      }
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "node_modules/**/*",
+      "!node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!node_modules/*.d.ts",
+      "!node_modules/.bin",
+      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}",
+      "!.editorconfig",
+      "!**/._*",
+      "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS,.gitignore,.gitattributes}",
+      "!**/{__pycache__,thumbs.db,.flowconfig,.idea,.vs,.nyc_output}",
+      "!**/{appveyor.yml,.travis.yml,circle.yml}",
+      "!**/{npm-debug.log,yarn.lock,.yarn-integrity,.yarn-metadata.json}"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.utilities",
+      "artifactName": "SmartcomRevisited-${version}-${arch}.${ext}",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "Smartcom Revisited ${version}",
+      "icon": "build/icon.png",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ],
+      "window": {
+        "width": 540,
+        "height": 380
+      }
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "publisherName": "Smartcom Revisited",
+      "legalTrademarks": "Smartcom Revisited"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Smartcom Revisited",
+      "include": "build/installer.nsh",
+      "license": "LICENSE",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "artifactName": "SmartcomRevisited-${version}-setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "SmartcomRevisited-${version}-portable.exe"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "rpm",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "Network",
+      "executableName": "smartcom-revisited",
+      "desktop": {
+        "Name": "Smartcom Revisited",
+        "Comment": "SSH and serial terminal with programmable buttons",
+        "Categories": "Network;RemoteAccess;System;TerminalEmulator;"
+      },
+      "artifactName": "SmartcomRevisited-${version}-${arch}.${ext}",
+      "synopsis": "Cross-platform SSH terminal with macro buttons and logging",
+      "description": "Smartcom Revisited is a modern SSH terminal application with SmartCOM-style macro buttons, comprehensive audit logging, and secure credential management. Perfect for network administrators and developers who need efficient SSH session management."
+    },
+    "deb": {
+      "depends": [
+        "libsecret-1-0",
+        "libgtk-3-0",
+        "libxss1",
+        "libatspi2.0-0",
+        "libdrm2",
+        "libxcomposite1",
+        "libxdamage1",
+        "libxrandr2",
+        "libgbm1"
+      ]
+    },
+    "rpm": {
+      "depends": [
+        "libsecret",
+        "gtk3",
+        "libXScrnSaver",
+        "at-spi2-atk",
+        "libdrm",
+        "libXcomposite",
+        "libXdamage",
+        "libXrandr",
+        "mesa-libgbm"
+      ]
+    },
+    "executableName": "smartcom-revisited"
+  }
+}

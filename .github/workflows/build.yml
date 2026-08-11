@@ -1,0 +1,86 @@
+name: Build installers
+
+# macOS .dmg must be built on macOS and .deb/.rpm on Linux, so each platform
+# gets its own runner. Pushing a v* tag also publishes a draft release.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows (nsis + portable)
+            command: npm run package:win
+            artifacts: |
+              release/*.exe
+              release/*.blockmap
+              release/latest.yml
+          - os: macos-latest
+            name: macOS (dmg + zip, x64 + arm64)
+            command: npm run package:mac
+            artifacts: |
+              release/*.dmg
+              release/*.zip
+              release/latest-mac.yml
+          - os: ubuntu-latest
+            name: Linux (AppImage + deb + rpm)
+            command: npm run package:linux
+            artifacts: |
+              release/*.AppImage
+              release/*.deb
+              release/*.rpm
+              release/latest-linux.yml
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # rpmbuild is not on the ubuntu image by default and the rpm target needs it.
+      - name: Install Linux packaging tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build installers
+        run: ${{ matrix.command }}
+        env:
+          # Unsigned builds; supply certificates as secrets to enable signing.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smartcom-revisited-${{ runner.os }}
+          path: ${{ matrix.artifacts }}
+          if-no-files-found: error
+
+      # The `latest*.yml` manifests are what the in-app updater reads, so they
+      # have to be attached to the release alongside the installers — without
+      # them every installed copy stays on its current version forever.
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: ${{ matrix.artifacts }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

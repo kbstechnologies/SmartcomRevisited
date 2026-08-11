@@ -1,0 +1,324 @@
+import { useEffect, useMemo, useState } from 'react'
+import { clsx } from 'clsx'
+import {
+  XMarkIcon,
+  PlusIcon,
+  Squares2X2Icon,
+  WindowIcon,
+  ArrowsPointingOutIcon,
+  DocumentTextIcon,
+  SignalIcon,
+  ArrowTopRightOnSquareIcon,
+} from '@heroicons/react/24/outline'
+import { useStore } from '../store/useStore'
+import Terminal from './Terminal'
+import ProfileSelector from './ProfileSelector'
+import { selectVisibleSession } from '../lib/paneSelection'
+import type { LayoutMode, Session } from '@shared/types'
+
+const MODE_BUTTONS: Array<{ mode: LayoutMode; label: string; Icon: typeof WindowIcon }> = [
+  { mode: 'tabs', label: 'Tabs', Icon: WindowIcon },
+  { mode: 'grid', label: 'Grid', Icon: Squares2X2Icon },
+  { mode: 'fullscreen', label: 'Full screen', Icon: ArrowsPointingOutIcon },
+]
+
+const statusColor = (status: Session['status']) =>
+  ({
+    connected: 'bg-green-500',
+    connecting: 'bg-yellow-500',
+    disconnected: 'bg-gray-500',
+    error: 'bg-red-500',
+  })[status] ?? 'bg-gray-500'
+
+/** Square-ish grid unless the user pinned a column count. */
+function gridColumnCount(sessionCount: number, configured: number): number {
+  if (configured > 0) return configured
+  if (sessionCount <= 1) return 1
+  return Math.ceil(Math.sqrt(sessionCount))
+}
+
+export default function SessionWorkspace() {
+  const allSessions = useStore((state) => state.sessions)
+  const sessionPlacement = useStore((state) => state.sessionPlacement)
+  const isDetached = useStore((state) => state.isDetachedWindow)
+  const detachSessions = useStore((state) => state.detachSessions)
+  const activeSessionId = useStore((state) => state.activeSessionId)
+  const layoutMode = useStore((state) => state.layoutMode)
+  const gridColumns = useStore((state) => state.gridColumns)
+  const broadcastInput = useStore((state) => state.broadcastInput)
+  const sessionLogs = useStore((state) => state.sessionLogs)
+
+  const setActiveSession = useStore((state) => state.setActiveSession)
+  const setLayoutMode = useStore((state) => state.setLayoutMode)
+  const setBroadcastInput = useStore((state) => state.setBroadcastInput)
+  const closeSession = useStore((state) => state.closeSession)
+  const toggleSessionLog = useStore((state) => state.toggleSessionLog)
+  const loadSessions = useStore((state) => state.loadSessions)
+
+  const [showProfileSelector, setShowProfileSelector] = useState(false)
+  /** Last pane clicked in THIS window; global focus may belong to another. */
+  const [lastFocusedHere, setLastFocusedHere] = useState<string | null>(null)
+
+  /**
+   * A session is shown in exactly one window. A detached window renders only
+   * the sessions it was handed; the main window renders everything that has
+   * not been detached, so a pane is never duplicated across monitors.
+   */
+  const ownedSessionIds = useMemo(() => {
+    const params = new URLSearchParams(window.location.search)
+    const ids = (params.get('sessions') ?? '').split(',').filter(Boolean)
+    return new Set(ids)
+  }, [])
+
+  const sessions = useMemo(
+    () =>
+      isDetached
+        ? allSessions.filter((session) => ownedSessionIds.has(session.id))
+        : allSessions.filter((session) => sessionPlacement[session.id] === undefined),
+    [allSessions, isDetached, ownedSessionIds, sessionPlacement]
+  )
+
+  useEffect(() => {
+    void loadSessions()
+  }, [loadSessions])
+
+  /**
+   * Which pane this window shows. Deliberately not the global active session:
+   * that is shared across windows so buttons can target a terminal on another
+   * monitor, and using it for visibility blanked detached windows whenever the
+   * main window opened a connection.
+   */
+  const visibleSessionId = useMemo(
+    () =>
+      selectVisibleSession(
+        sessions.map((session) => session.id),
+        activeSessionId,
+        lastFocusedHere
+      ),
+    [sessions, activeSessionId, lastFocusedHere]
+  )
+
+  const columns = useMemo(
+    () => gridColumnCount(sessions.length, gridColumns),
+    [sessions.length, gridColumns]
+  )
+
+  /** Focus is owned by the main process so every window agrees on the target. */
+  const focusSession = (sessionId: string) => {
+    setLastFocusedHere(sessionId)
+    setActiveSession(sessionId)
+    void window.electronAPI.invoke('windows:set-active-session', { sessionId })
+  }
+
+  const handleClose = async (sessionId: string, event: React.MouseEvent) => {
+    event.stopPropagation()
+    await closeSession(sessionId)
+  }
+
+  const handleToggleLog = async (sessionId: string, event: React.MouseEvent) => {
+    event.stopPropagation()
+    await toggleSessionLog(sessionId)
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Toolbar: layout modes, broadcast, new session */}
+      <div className="flex items-center gap-2 px-2 py-1.5 bg-gray-800 border-b border-gray-700">
+        <div className="flex rounded overflow-hidden border border-gray-600">
+          {MODE_BUTTONS.map(({ mode, label, Icon }) => (
+            <button
+              key={mode}
+              onClick={() => setLayoutMode(mode)}
+              title={label}
+              className={clsx(
+                'flex items-center gap-1 px-2 py-1 text-xs transition-colors',
+                layoutMode === mode
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              )}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">{label}</span>
+            </button>
+          ))}
+        </div>
+
+        <button
+          onClick={() => setBroadcastInput(!broadcastInput)}
+          title="Type into every connected session at once"
+          className={clsx(
+            'flex items-center gap-1 px-2 py-1 text-xs rounded border transition-colors',
+            broadcastInput
+              ? 'bg-amber-600 border-amber-500 text-white'
+              : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
+          )}
+        >
+          <SignalIcon className="w-3.5 h-3.5" />
+          Broadcast
+        </button>
+
+        <div className="flex-1" />
+
+        <span className="text-xs text-gray-500">
+          {sessions.length} session{sessions.length === 1 ? '' : 's'}
+        </span>
+
+        {/* Detaching moves the focused terminal to its own window — useful for
+            watching a session on a second monitor. The buttons stay here. */}
+        {!isDetached && (
+          <button
+            onClick={() => activeSessionId && void detachSessions([activeSessionId])}
+            disabled={!activeSessionId}
+            title="Open the focused terminal in its own window"
+            className="flex items-center gap-1 px-2 py-1 text-xs rounded bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600 disabled:opacity-40"
+          >
+            <ArrowTopRightOnSquareIcon className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Pop out</span>
+          </button>
+        )}
+
+        {!isDetached && (
+          <button
+            onClick={() => setShowProfileSelector(true)}
+            className="flex items-center gap-1 px-2 py-1 text-xs rounded bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600"
+          >
+            <PlusIcon className="w-3.5 h-3.5" />
+            New
+          </button>
+        )}
+      </div>
+
+      {/* Tab strip (tabs mode only) */}
+      {layoutMode === 'tabs' && sessions.length > 0 && (
+        <div className="flex items-center bg-gray-800 border-b border-gray-700 overflow-x-auto">
+          {sessions.map((session) => (
+            <div
+              key={session.id}
+              onClick={() => focusSession(session.id)}
+              className={clsx(
+                'flex items-center gap-2 px-3 py-2 text-sm border-r border-gray-700 cursor-pointer max-w-48',
+                visibleSessionId === session.id
+                  ? 'bg-gray-700 text-blue-400'
+                  : 'text-gray-300 hover:bg-gray-700'
+              )}
+            >
+              <div className={clsx('w-2 h-2 rounded-full shrink-0', statusColor(session.status))} />
+              <span className="truncate">{session.profileName}</span>
+              {sessionLogs[session.id] && (
+                <DocumentTextIcon className="w-3.5 h-3.5 text-green-400 shrink-0" title="Logging" />
+              )}
+              <button
+                onClick={(event) => handleClose(session.id, event)}
+                className="p-0.5 rounded hover:bg-gray-600 shrink-0"
+              >
+                <XMarkIcon className="w-3 h-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Panes */}
+      <div className="flex-1 overflow-hidden bg-gray-900">
+        {sessions.length === 0 ? (
+          <div className="flex items-center justify-center h-full text-gray-500">
+            <div className="text-center">
+              <div className="text-6xl mb-4">🔗</div>
+              <h2 className="text-xl font-medium mb-2">No active session</h2>
+              <p className="text-gray-400 mb-4">Connect to one or more servers to get started</p>
+              <button
+                onClick={() => setShowProfileSelector(true)}
+                className="inline-flex items-center px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-500"
+              >
+                <PlusIcon className="w-4 h-4 mr-2" />
+                New connection
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div
+            className={clsx('h-full w-full', layoutMode === 'grid' ? 'grid gap-1 p-1' : 'relative')}
+            style={
+              layoutMode === 'grid'
+                ? { gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }
+                : undefined
+            }
+          >
+            {sessions.map((session) => {
+              const isActive = session.id === visibleSessionId
+              // Every pane stays mounted so scrollback and the PTY-side size
+              // survive switching modes.
+              //
+              // Inactive panes are hidden with `invisible` (visibility:hidden),
+              // never `hidden` (display:none): a display:none pane collapses to
+              // 0x0, which leaves xterm with degenerate dimensions — it renders
+              // blank and stops advancing when you switch back to it.
+              // visibility:hidden keeps the box laid out at full size.
+              const inactive = layoutMode !== 'grid' && !isActive
+
+              return (
+                <div
+                  key={session.id}
+                  onMouseDown={() => focusSession(session.id)}
+                  className={clsx(
+                    'flex flex-col overflow-hidden',
+                    layoutMode === 'grid'
+                      ? clsx(
+                          'rounded border min-h-0',
+                          isActive ? 'border-blue-500' : 'border-gray-700'
+                        )
+                      : 'absolute inset-0',
+                    inactive && 'invisible pointer-events-none'
+                  )}
+                >
+                  {layoutMode === 'grid' && (
+                    <div
+                      className={clsx(
+                        'flex items-center gap-2 px-2 py-1 text-xs border-b',
+                        isActive
+                          ? 'bg-blue-950 border-blue-500 text-blue-200'
+                          : 'bg-gray-800 border-gray-700 text-gray-400'
+                      )}
+                    >
+                      <div className={clsx('w-2 h-2 rounded-full', statusColor(session.status))} />
+                      <span className="truncate flex-1">{session.profileName}</span>
+                      <button
+                        onClick={(event) => handleToggleLog(session.id, event)}
+                        title={sessionLogs[session.id] ? 'Stop logging' : 'Start logging'}
+                        className="p-0.5 rounded hover:bg-gray-700"
+                      >
+                        <DocumentTextIcon
+                          className={clsx(
+                            'w-3.5 h-3.5',
+                            sessionLogs[session.id] ? 'text-green-400' : 'text-gray-500'
+                          )}
+                        />
+                      </button>
+                      <button
+                        onClick={(event) => handleClose(session.id, event)}
+                        className="p-0.5 rounded hover:bg-gray-700"
+                      >
+                        <XMarkIcon className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="flex-1 min-h-0">
+                    <Terminal sessionId={session.id} isActive={isActive} />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {showProfileSelector && (
+        <ProfileSelector
+          onClose={() => setShowProfileSelector(false)}
+          onConnected={() => setShowProfileSelector(false)}
+        />
+      )}
+    </div>
+  )
+}

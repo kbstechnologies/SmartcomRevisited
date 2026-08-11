@@ -1,0 +1,27 @@
+# Disposable SSH targets for exercising Smartcom Revisited.
+#   npm run testserver:up      start them
+#   npm run testserver:down    stop and remove them
+#
+# Three hosts so grid mode, broadcast and multi-select have something real to
+# talk to. Credentials are testuser / testpass on ports 2222-2224.
+services:
+  smartcom-test:
+    build: .
+    image: smartcom-test-server
+    container_name: smartcom-test
+    ports:
+      - '2222:22'
+
+  smartcom-test-2:
+    image: smartcom-test-server
+    container_name: smartcom-test-2
+    depends_on: [smartcom-test]
+    ports:
+      - '2223:22'
+
+  smartcom-test-3:
+    image: smartcom-test-server
+    container_name: smartcom-test-3
+    depends_on: [smartcom-test]
+    ports:
+      - '2224:22'
