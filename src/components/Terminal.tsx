@@ -8,6 +8,7 @@ import { ArrowDownIcon } from '@heroicons/react/24/solid'
 import '@xterm/xterm/css/xterm.css'
 import { useStore } from '../store/useStore'
 import { primeSessionHistory, subscribeToSession } from '../lib/sessionStream'
+import { preparePaste } from '../lib/paste'
 
 interface TerminalProps {
   sessionId: string
@@ -196,7 +197,15 @@ export default function Terminal({ sessionId, isActive = true }: TerminalProps) 
     const pasteClipboard = async () => {
       const response = await window.electronAPI.invoke<{ text: string }>('clipboard:read')
       const text = response.success ? response.data?.text : ''
-      if (text) await useStore.getState().sendToSession(sessionId, text)
+      if (!text) return
+
+      // The clipboard cannot go to the pty as-is: CRLF reads as two Enters, and
+      // without the paste markers the remote treats a paste as typing. See
+      // `preparePaste`. Whether the markers are safe to send is the terminal's
+      // own DECSET 2004 state — it must not be assumed.
+      await useStore
+        .getState()
+        .sendToSession(sessionId, preparePaste(text, xterm.modes.bracketedPasteMode))
     }
 
     const handleContextMenu = (event: MouseEvent) => {
