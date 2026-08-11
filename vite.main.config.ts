@@ -31,6 +31,11 @@ export default defineConfig({
       ],
     },
     outDir: 'dist-electron',
+    // Must stay false: the preload build writes to the same directory, so
+    // either build emptying it would delete the other's output. The directory
+    // is cleaned once by `build:electron` instead — without that, Vite's hashed
+    // chunks accumulate forever and every past build's main bundle is packaged
+    // into the installer (20 stale chunks, ~13 MB, as of 1.1.0).
     emptyOutDir: false,
   },
   resolve: {
