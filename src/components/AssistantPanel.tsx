@@ -125,7 +125,7 @@ interface AssistantPanelProps {
 export default function AssistantPanel({ onOpenSettings, settingsOpen }: AssistantPanelProps) {
   const activeSessionId = useStore((state) => state.activeSessionId)
   const sessions = useStore((state) => state.sessions)
-  const sendToSession = useStore((state) => state.sendToSession)
+  const pasteToSession = useStore((state) => state.pasteToSession)
   const askAssistant = useStore((state) => state.askAssistant)
   const cancelAssistant = useStore((state) => state.cancelAssistant)
   const loadAiSettings = useStore((state) => state.loadAiSettings)
@@ -417,10 +417,14 @@ export default function AssistantPanel({ onOpenSettings, settingsOpen }: Assista
                         </button>
                         <button
                           onClick={() =>
-                            activeSessionId && sendToSession(activeSessionId, segment.body)
+                            activeSessionId && pasteToSession(activeSessionId, segment.body)
                           }
                           disabled={!activeSessionId}
-                          title="Type into the focused terminal without pressing Enter"
+                          // Sent as a paste, not as typing. A suggestion is
+                          // often several lines, and typed in they would run one
+                          // by one — this panel proposes commands, it does not
+                          // run them.
+                          title="Insert into the focused terminal without running it"
                           className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded text-gray-400 hover:text-gray-100 hover:bg-gray-700 disabled:opacity-40"
                         >
                           <PlayIcon className="w-3 h-3" />

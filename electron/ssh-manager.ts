@@ -6,6 +6,7 @@ import { dirname, join } from 'path'
 import { keytar } from './keychain'
 import type { Macro, MacroStep, Profile, Session } from '../src/shared/types'
 import { VAULT_SERVICE } from '../src/shared/constants'
+import { preparePaste, trackBracketedPaste } from '../src/shared/paste'
 import { interpolate, resolveFields } from '../src/shared/types'
 
 // Simple UUID v4 generator
@@ -23,6 +24,7 @@ const uuidv4 = (): string => {
     hex.slice(20, 32),
   ].join('-')
 }
+
 
 /** Transcript retained per session for assistant context. */
 const MAX_TRANSCRIPT_CHARS = 120_000
@@ -94,6 +96,16 @@ export interface SSHSession extends EventEmitter {
    * so full-screen programs — nano, vim, top — drew into a corner of it.
    */
   pendingSize?: { cols: number; rows: number }
+  /**
+   * Whether the remote has turned bracketed paste on (DECSET 2004).
+   *
+   * Tracked here rather than read off the renderer's xterm instance because a
+   * session's pane can be in a detached window, so the window doing the pasting
+   * may have no terminal to ask.
+   */
+  bracketedPaste: boolean
+  /** Tail of the last chunk, so an escape sequence split across reads is seen. */
+  modeScanCarry: string
   shell?: any
   /** Present only on serial sessions. */
   serialPort?: { close: (cb?: (e?: Error | null) => void) => void }
@@ -316,6 +328,8 @@ export class SSHManager extends EventEmitter {
       createdAt: new Date(),
       transcript: '',
       scrollback: '',
+      bracketedPaste: false,
+      modeScanCarry: '',
     })
 
     this.sessions.set(sessionId, session)
@@ -418,6 +432,8 @@ export class SSHManager extends EventEmitter {
       createdAt: new Date(),
       transcript: '',
       scrollback: '',
+      bracketedPaste: false,
+      modeScanCarry: '',
     })
 
     this.sessions.set(sessionId, session)
@@ -668,6 +684,15 @@ export class SSHManager extends EventEmitter {
    * copy that a newly mounted pane can replay so it is not blank.
    */
   private recordTranscript(session: SSHSession, text: string) {
+    // Follows the remote switching bracketed paste on and off, so a paste is
+    // only wrapped in the markers when the far end will consume them.
+    const mode = trackBracketedPaste(
+      { enabled: session.bracketedPaste, carry: session.modeScanCarry },
+      text
+    )
+    session.bracketedPaste = mode.enabled
+    session.modeScanCarry = mode.carry
+
     const rawCombined = session.scrollback + text
     session.scrollback =
       rawCombined.length > MAX_SCROLLBACK_CHARS
@@ -724,6 +749,21 @@ export class SSHManager extends EventEmitter {
     session.shell.write(text)
     session.lastActivity = new Date()
     return true
+  }
+
+  /**
+   * Sends text as a *paste* rather than as typing.
+   *
+   * Writing the clipboard straight through corrupts anything multi-line: CRLF
+   * reads as two Enters, and without the bracketed-paste markers the remote
+   * treats the block as keystrokes and auto-indents it. See `preparePaste`.
+   * Whether the markers are safe is tracked per session from the remote's own
+   * DECSET 2004 switching, so this works for a pane in any window.
+   */
+  pasteToSession(sessionId: string, text: string): boolean {
+    const session = this.sessions.get(sessionId)
+    if (!session) return false
+    return this.sendToSession(sessionId, preparePaste(text, session.bracketedPaste))
   }
 
   resizeSession(sessionId: string, cols: number, rows: number): boolean {

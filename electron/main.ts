@@ -506,6 +506,11 @@ class SmartcomRevisitedApp {
             return { success: true, data: { sent } }
           }
 
+          case 'sessions:paste': {
+            const sent = this.sshManager.pasteToSession(request.data.sessionId, request.data.text)
+            return { success: true, data: { sent } }
+          }
+
           case 'sessions:broadcast': {
             const results = request.data.sessionIds.map((id) => ({
               sessionId: id,

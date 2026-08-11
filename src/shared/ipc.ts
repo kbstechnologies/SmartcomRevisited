@@ -47,6 +47,14 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
     channel: z.literal('sessions:send'),
     data: z.object({ sessionId: z.string(), text: z.string() }),
   }),
+  // Text that came from the clipboard or from a suggestion, rather than from
+  // keystrokes. The main process converts line endings and, when the remote has
+  // asked for bracketed paste, wraps it — sending it as typing corrupts
+  // anything multi-line.
+  z.object({
+    channel: z.literal('sessions:paste'),
+    data: z.object({ sessionId: z.string(), text: z.string() }),
+  }),
   z.object({
     channel: z.literal('sessions:broadcast'),
     data: z.object({ sessionIds: z.array(z.string()), text: z.string() }),

@@ -171,6 +171,8 @@ interface AppStore {
   openSessions: (profileIds: string[]) => Promise<OpenSessionOutcome[]>
   closeSession: (sessionId: string) => Promise<boolean>
   sendToSession: (sessionId: string, text: string) => Promise<boolean>
+  /** Clipboard or suggested text, sent as a paste rather than as keystrokes. */
+  pasteToSession: (sessionId: string, text: string) => Promise<boolean>
   broadcast: (text: string) => Promise<void>
   resizeSession: (sessionId: string, cols: number, rows: number) => Promise<boolean>
 
@@ -536,6 +538,11 @@ const useStore = create<AppStore>((set, get) => ({
     if (get().isMacroRecording) {
       get().addRecordedCommand(text.trim())
     }
+    return sent
+  },
+
+  pasteToSession: async (sessionId, text) => {
+    const { sent } = await invoke<{ sent: boolean }>('sessions:paste', { sessionId, text })
     return sent
   },
 
