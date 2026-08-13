@@ -148,6 +148,76 @@ describe('macro engine', () => {
     expect(written).toEqual(['first host1\n', 'second host1\n'])
   })
 
+  it('makes global variables available without the button declaring them', async () => {
+    const { session, written } = makeFakeSession()
+    withSession(manager, session)
+    manager.setGlobalVariableProvider(() => ({ KBSTECHLOG: 'https://fake.com/log' }))
+
+    const result = await manager.runMacro(
+      session.id,
+      macro('log', [{ type: 'send', text: 'wget {{KBSTECHLOG}}', appendEnter: true }]),
+      {}
+    )
+
+    expect(result.success).toBe(true)
+    expect(written).toEqual(['wget https://fake.com/log\n'])
+  })
+
+  it('lets a typed value and a field default beat a global of the same name', async () => {
+    const { session, written } = makeFakeSession()
+    withSession(manager, session)
+    manager.setGlobalVariableProvider(() => ({ HOST: 'global-host', SITE: 'global-site' }))
+
+    await manager.runMacro(
+      session.id,
+      macro('override', [{ type: 'send', text: 'ssh {{HOST}} {{SITE}}', appendEnter: true }], {
+        fields: [
+          { name: 'SITE', type: 'text', defaultValue: 'field-site', options: [], required: false },
+        ],
+      }),
+      { HOST: 'typed-host' }
+    )
+
+    expect(written).toEqual(['ssh typed-host field-site\n'])
+  })
+
+  it('passes globals down into a called macro', async () => {
+    const { session, written } = makeFakeSession()
+    withSession(manager, session)
+    manager.setGlobalVariableProvider(() => ({ KBSTECHLOG: 'https://fake.com/log' }))
+
+    const child = macro('child', [{ type: 'send', text: 'curl {{KBSTECHLOG}}', appendEnter: true }])
+    manager.setMacroResolver({
+      getMacro: (id) => (id === 'child' ? child : null),
+      listMacrosInSet: () => [],
+    })
+
+    await manager.runMacro(
+      session.id,
+      macro('parent', [{ type: 'callMacro', targetMacroId: 'child' }]),
+      {}
+    )
+
+    expect(written).toEqual(['curl https://fake.com/log\n'])
+  })
+
+  it('runs the button anyway when the globals file cannot be read', async () => {
+    const { session, written } = makeFakeSession()
+    withSession(manager, session)
+    manager.setGlobalVariableProvider(() => {
+      throw new Error('globals file is unreadable')
+    })
+
+    const result = await manager.runMacro(
+      session.id,
+      macro('plain', [{ type: 'send', text: 'uptime', appendEnter: true }]),
+      {}
+    )
+
+    expect(result.success).toBe(true)
+    expect(written).toEqual(['uptime\n'])
+  })
+
   it('detects recursion instead of looping forever', async () => {
     const { session } = makeFakeSession()
     withSession(manager, session)

@@ -18,6 +18,17 @@ import type {
   ScriptEntry,
 } from '@shared/types'
 import type { AiSettings, AiAsk, AiStreamEvent, AssistantTurn } from '@shared/ai'
+import type { GlobalVar, GlobalVarProblem } from '@shared/global-vars'
+
+/** The global variables file as the main process last read it. */
+export interface GlobalVarsState {
+  /** Where the file is, shown in the editor so it can be found on disk. */
+  path: string
+  /** Raw file text, so the editor can offer the file itself, not a rendering. */
+  text: string
+  vars: GlobalVar[]
+  problems: GlobalVarProblem[]
+}
 
 /** An inline `form` step waiting on the operator. */
 export interface PendingFormRequest {
@@ -39,7 +50,7 @@ export interface PendingConfirmRequest {
 }
 
 /** Modal dialogs that can be opened from more than one place. */
-export type AppDialog = 'keys' | 'settings' | 'logs' | 'about' | 'scripts' | null
+export type AppDialog = 'keys' | 'settings' | 'logs' | 'about' | 'scripts' | 'globals' | null
 
 export interface MacroProgress {
   macroName?: string
@@ -90,6 +101,13 @@ interface AppStore {
   /** Script library folder and its tree, as last read from disk. */
   scriptLibrary: { root: string; entries: ScriptEntry[] }
 
+  /**
+   * Global variables, available to every button as `{{NAME}}`. Kept in the
+   * store rather than in the editor dialog because the button panel resolves
+   * form defaults through them before it prompts.
+   */
+  globalVars: GlobalVarsState
+
   assistantTurns: AssistantTurn[]
   assistantInput: string
   assistantRequestId: string | null
@@ -135,6 +153,9 @@ interface AppStore {
   chooseScriptFolder: () => Promise<boolean>
   readScript: (path: string) => Promise<{ path: string; content: string; size: number }>
   revealScriptFolder: () => Promise<void>
+  loadGlobalVars: () => Promise<void>
+  saveGlobalVars: (text: string) => Promise<GlobalVarsState>
+  revealGlobalVars: () => Promise<void>
   runScriptOnSession: (params: {
     sessionId: string
     path: string
@@ -277,6 +298,7 @@ const useStore = create<AppStore>((set, get) => ({
   sessionPlacement: {},
   isDetachedWindow: false,
   scriptLibrary: { root: '', entries: [] },
+  globalVars: { path: '', text: '', vars: [], problems: [] },
   assistantTurns: [],
   assistantInput: '',
   assistantRequestId: null,
@@ -377,6 +399,22 @@ const useStore = create<AppStore>((set, get) => ({
 
   revealScriptFolder: async () => {
     await invoke('scripts:reveal')
+  },
+
+  loadGlobalVars: async () => {
+    set({ globalVars: await invoke<GlobalVarsState>('globals:get') })
+  },
+
+  saveGlobalVars: async (text) => {
+    // The main process answers with the file as it now reads, so the editor
+    // shows what was actually written rather than what was typed.
+    const globalVars = await invoke<GlobalVarsState>('globals:save', { text })
+    set({ globalVars })
+    return globalVars
+  },
+
+  revealGlobalVars: async () => {
+    await invoke('globals:reveal')
   },
 
   runScriptOnSession: async (params) =>

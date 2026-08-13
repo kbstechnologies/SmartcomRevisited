@@ -8,6 +8,7 @@ import {
   Cog6ToothIcon,
   DocumentMagnifyingGlassIcon,
   InformationCircleIcon,
+  VariableIcon,
 } from '@heroicons/react/24/outline'
 import { useStore } from '../store/useStore'
 import SessionWorkspace from './SessionWorkspace'
@@ -15,6 +16,7 @@ import MacroPanel from './MacroPanel'
 import StatusBar from './StatusBar'
 import KeyManager from './KeyManager'
 import ScriptLibrary from './ScriptLibrary'
+import GlobalVariables from './GlobalVariables'
 import SettingsPanel from './SettingsPanel'
 import LogsViewer from './LogsViewer'
 import AboutDialog from './AboutDialog'
@@ -173,6 +175,13 @@ export default function Layout() {
                   <FolderIcon className="w-4 h-4" />
                 </button>
                 <button
+                  onClick={() => setActiveDialog('globals')}
+                  title="Global variables — {{NAME}} in every button"
+                  className="p-1 rounded hover:bg-gray-700 text-gray-400"
+                >
+                  <VariableIcon className="w-4 h-4" />
+                </button>
+                <button
                   onClick={() => setActiveDialog('logs')}
                   title="Audit log"
                   className="p-1 rounded hover:bg-gray-700 text-gray-400"
@@ -216,6 +225,7 @@ export default function Layout() {
 
       {activeDialog === 'keys' && <KeyManager onClose={() => setActiveDialog(null)} />}
       {activeDialog === 'scripts' && <ScriptLibrary onClose={() => setActiveDialog(null)} />}
+      {activeDialog === 'globals' && <GlobalVariables onClose={() => setActiveDialog(null)} />}
       {activeDialog === 'about' && <AboutDialog onClose={() => setActiveDialog(null)} />}
       {showAssistantSettings && (
         <AssistantSettings onClose={() => setShowAssistantSettings(false)} />

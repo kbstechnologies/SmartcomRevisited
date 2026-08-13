@@ -7,6 +7,13 @@ import { DatabaseManager } from './database'
 import { SSHManager, buildScriptCommand } from './ssh-manager'
 import { listLibrary, readScript } from './script-library'
 import {
+  ensureGlobalsFile,
+  globalsFilePath,
+  loadGlobals,
+  readGlobalsText,
+  writeGlobalsText,
+} from './global-variables'
+import {
   generateKeyPair,
   installPublicKeyOnClient,
   installPublicKeyViaPassword,
@@ -16,7 +23,7 @@ import {
 import type { IpcResponse } from '../src/shared/ipc'
 import { IpcRequestSchema } from '../src/shared/ipc'
 import type { AuditLog, Settings } from '../src/shared/types'
-import { ButtonSetBundleSchema, ConnectionBundleSchema } from '../src/shared/types'
+import { ButtonSetBundleSchema, ConnectionBundleSchema, interpolate } from '../src/shared/types'
 import { APP_NAME, REPOSITORY_URL, VAULT_SERVICE } from '../src/shared/constants'
 import { UpdateService, packageKind } from './updater'
 import { migrateLegacyUserData } from './migrate-legacy-data'
@@ -102,6 +109,10 @@ class SmartcomRevisitedApp {
       const script = await readScript(root, relativePath)
       return { content: script.content, name: relativePath.split('/').pop() || 'script' }
     })
+
+    // Global variables are read from the file per run, not cached here, so a
+    // value edited in another editor is live on the next button press.
+    this.sshManager.setGlobalVariableProvider(() => loadGlobals(this.globalsPath()).values)
 
     this.sshManager.setPrivateKeyProvider(async (keyId) => {
       const privateKey = await keytar.getPassword(VAULT_SERVICE, keyVaultAccount(keyId))
@@ -197,6 +208,15 @@ class SmartcomRevisitedApp {
   /** Configured script library folder, or '' when the user has not set one. */
   private scriptLibraryRoot(): string {
     return (this.db.getAllSettings().scriptLibraryDir as string) || ''
+  }
+
+  /**
+   * The global variables file. It lives in userData beside the database rather
+   * than in the install directory so it survives an upgrade and is the user's
+   * to edit, back up or keep in sync themselves.
+   */
+  private globalsPath(): string {
+    return globalsFilePath(app.getPath('userData'))
   }
 
   private aiSettings(): AiSettings {
@@ -628,21 +648,60 @@ class SmartcomRevisitedApp {
           }
 
           case 'scripts:run': {
+            // Globals apply here too, so `--log {{KBSTECHLOG}}` in the arguments
+            // box behaves the same as it does inside a button.
+            const globals = loadGlobals(this.globalsPath()).values
+
             const { remotePath, name } = await this.sshManager.stageScript(
               request.data.sessionId,
               request.data.path,
-              request.data.remoteDir || '/tmp'
+              interpolate(request.data.remoteDir || '/tmp', globals)
             )
 
             const line = buildScriptCommand({
               remotePath,
-              interpreter: request.data.interpreter,
-              args: request.data.args,
+              interpreter: interpolate(request.data.interpreter ?? '', globals) || undefined,
+              args: interpolate(request.data.args ?? '', globals) || undefined,
               cleanup: request.data.cleanup,
             })
 
             await this.sshManager.sendToSession(request.data.sessionId, `${line}\n`)
             return { success: true, data: { remotePath, name, command: line } }
+          }
+
+          // -------------------------------------------------- global variables
+          case 'globals:get': {
+            const filePath = this.globalsPath()
+            const text = readGlobalsText(filePath)
+            const parsed = loadGlobals(filePath)
+            return {
+              success: true,
+              data: { path: filePath, text, vars: parsed.vars, problems: parsed.problems },
+            }
+          }
+
+          case 'globals:save': {
+            const filePath = this.globalsPath()
+            writeGlobalsText(filePath, request.data.text)
+
+            const parsed = loadGlobals(filePath)
+            return {
+              success: true,
+              data: {
+                path: filePath,
+                text: readGlobalsText(filePath),
+                vars: parsed.vars,
+                problems: parsed.problems,
+              },
+            }
+          }
+
+          case 'globals:reveal': {
+            // Created first: opening a path that does not exist yet just fails
+            // silently, which reads as the button doing nothing.
+            const filePath = ensureGlobalsFile(this.globalsPath())
+            await shell.openPath(filePath)
+            return { success: true, data: { path: filePath } }
           }
 
           case 'macros:submit-confirm':

@@ -17,9 +17,11 @@ import { useStore } from '../store/useStore'
 import MacroForm from './MacroForm'
 import MacroSetForm from './MacroSetForm'
 import VariableForm from './VariableForm'
+import SetVisibilityMenu from './SetVisibilityMenu'
 import { getMacroIcon, colorClasses } from '../lib/icons'
 import { describeTargets, macroTargets } from '../lib/macroTargets'
-import { resolveFields, type Macro, type FormField, type MacroSet } from '@shared/types'
+import { loadHiddenSets, saveHiddenSets, toggleHiddenSet } from '../lib/setVisibility'
+import { interpolate, resolveFields, type Macro, type FormField, type MacroSet } from '@shared/types'
 
 export default function MacroPanel() {
   const macros = useStore((state) => state.macros)
@@ -28,6 +30,7 @@ export default function MacroPanel() {
   const sessions = useStore((state) => state.sessions)
   const macroProgress = useStore((state) => state.macroProgress)
   const broadcastInput = useStore((state) => state.broadcastInput)
+  const globalVars = useStore((state) => state.globalVars)
 
   const loadMacros = useStore((state) => state.loadMacros)
   const loadMacroSets = useStore((state) => state.loadMacroSets)
@@ -42,6 +45,9 @@ export default function MacroPanel() {
 
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  /** Sets ticked off in the right-click menu. Remembered between runs. */
+  const [hiddenSets, setHiddenSets] = useState<string[]>([])
+  const [visibilityMenu, setVisibilityMenu] = useState<{ x: number; y: number } | null>(null)
   const [editingMacro, setEditingMacro] = useState<Macro | null>(null)
   const [creatingInSet, setCreatingInSet] = useState<string | null>(null)
   const [showSetForm, setShowSetForm] = useState(false)
@@ -53,6 +59,17 @@ export default function MacroPanel() {
     void loadMacros()
     void loadMacroSets()
   }, [loadMacros, loadMacroSets])
+
+  // Read once the sets are known, so ids of sets that have since been deleted
+  // are dropped rather than kept forever.
+  useEffect(() => {
+    setHiddenSets(loadHiddenSets(macroSets.map((set) => set.id!).filter(Boolean)))
+  }, [macroSets])
+
+  const updateHidden = (next: string[]) => {
+    setHiddenSets(next)
+    saveHiddenSets(next)
+  }
 
   // Buttons follow the same broadcast switch as typing does.
   const targets = macroTargets(sessions, activeSessionId, broadcastInput)
@@ -72,6 +89,17 @@ export default function MacroPanel() {
       ),
     }))
   }, [macros, macroSets, search])
+
+  const shown = grouped.filter(({ set }) => !hiddenSets.includes(set.id!))
+  /**
+   * Hidden sets stay hidden while searching — unlike a collapsed folder, being
+   * hidden is a choice the user made about this set rather than about the room
+   * on screen. But a search that quietly misses matches is indistinguishable
+   * from having none, so the count of what is out of sight is always on screen.
+   */
+  const hiddenMatches = grouped
+    .filter(({ set }) => hiddenSets.includes(set.id!))
+    .reduce((total, { items }) => total + items.length, 0)
 
   const toggleSet = (setId: string) =>
     setCollapsed((current) => {
@@ -136,7 +164,15 @@ export default function MacroPanel() {
       return
     }
 
-    const fields = resolveFields(macro)
+    // A default may itself reference a global — `{{KBSTECHLOG}}` as the default
+    // of a URL field — so the form shows the resolved value, the same way an
+    // `Ask for input` block mid-script already does.
+    const values = Object.fromEntries(globalVars.vars.map((entry) => [entry.name, entry.value]))
+    const fields = resolveFields(macro).map((field) => ({
+      ...field,
+      defaultValue: interpolate(field.defaultValue ?? '', values),
+    }))
+
     if (fields.length > 0) {
       setPrompting({ macro, fields })
       return
@@ -315,14 +351,28 @@ export default function MacroPanel() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-3">
+      {/* Right-click anywhere in the sets area to choose which sets show. */}
+      <div
+        onContextMenu={(event) => {
+          event.preventDefault()
+          setVisibilityMenu({ x: event.clientX, y: event.clientY })
+        }}
+        title="Right-click to choose which button sets are shown"
+        className="flex-1 overflow-y-auto p-2 space-y-3"
+      >
         {macroSets.length === 0 && (
           <p className="text-xs text-gray-500 text-center py-6">
             Create a button set to get started.
           </p>
         )}
 
-        {grouped.map(({ set, items }) => {
+        {macroSets.length > 0 && shown.length === 0 && (
+          <p className="text-xs text-gray-500 text-center py-6">
+            Every button set is hidden. Right-click here to bring one back.
+          </p>
+        )}
+
+        {shown.map(({ set, items }) => {
           const isCollapsed = collapsed.has(set.id!)
 
           return (
@@ -428,6 +478,33 @@ export default function MacroPanel() {
           )
         })}
       </div>
+
+      {hiddenSets.length > 0 && (
+        <button
+          type="button"
+          onClick={(event) =>
+            setVisibilityMenu({ x: event.clientX, y: event.currentTarget.getBoundingClientRect().top })
+          }
+          title="Choose which button sets are shown"
+          className="px-2 py-1 text-left text-[11px] text-gray-500 border-t border-gray-700 hover:bg-gray-700/50 hover:text-gray-300"
+        >
+          {hiddenSets.length} set{hiddenSets.length === 1 ? '' : 's'} hidden
+          {search.trim() && hiddenMatches > 0 && ` — ${hiddenMatches} match(es) not shown`}
+        </button>
+      )}
+
+      {visibilityMenu && (
+        <SetVisibilityMenu
+          sets={macroSets}
+          hidden={hiddenSets}
+          x={visibilityMenu.x}
+          y={visibilityMenu.y}
+          onToggle={(setId) => updateHidden(toggleHiddenSet(hiddenSets, setId))}
+          onShowAll={() => updateHidden([])}
+          onHideAll={() => updateHidden(macroSets.map((set) => set.id!).filter(Boolean))}
+          onClose={() => setVisibilityMenu(null)}
+        />
+      )}
 
       {prompting && (
         <VariableForm

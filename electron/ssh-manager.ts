@@ -170,6 +170,12 @@ export type PrivateKeyProvider = (
   keyId: string
 ) => Promise<{ privateKey: string; passphrase?: string } | null>
 
+/**
+ * Supplies the global variables every run starts with. Called per run rather
+ * than cached so an edit to the file lands on the next button press.
+ */
+export type GlobalVariableProvider = () => Record<string, string>
+
 export interface MacroRunResult {
   success: boolean
   error?: string
@@ -210,6 +216,7 @@ export class SSHManager extends EventEmitter {
   private macroResolver: MacroResolver | null = null
   private scriptProvider: ScriptProvider | null = null
   private privateKeyProvider: PrivateKeyProvider | null = null
+  private globalVariableProvider: GlobalVariableProvider | null = null
   private logDirectory: string
   private defaultLogFormat: SessionLogFormat = 'plain'
 
@@ -224,6 +231,22 @@ export class SSHManager extends EventEmitter {
 
   setScriptProvider(provider: ScriptProvider) {
     this.scriptProvider = provider
+  }
+
+  /** Variables every macro run inherits, from the user's globals file. */
+  setGlobalVariableProvider(provider: GlobalVariableProvider) {
+    this.globalVariableProvider = provider
+  }
+
+  /** Never lets a broken globals file stop a button from running. */
+  globalVariables(): Record<string, string> {
+    if (!this.globalVariableProvider) return {}
+    try {
+      return this.globalVariableProvider()
+    } catch (error) {
+      console.error('Could not read global variables:', error)
+      return {}
+    }
   }
 
   /**
@@ -877,8 +900,13 @@ export class SSHManager extends EventEmitter {
     this.cancelledRuns.delete(sessionId)
     const commands: string[] = []
 
+    // Globals sit underneath everything: they are the environment a run happens
+    // in, so anything the button defines or the operator typed overrides them.
+    // Called macros inherit them for free, since the callee scope starts from
+    // the caller's.
+    const scope: Record<string, string> = { ...this.globalVariables() }
+
     // Field defaults fill any variable the caller did not supply.
-    const scope: Record<string, string> = {}
     for (const field of resolveFields(macro)) {
       if (field.defaultValue) scope[field.name] = field.defaultValue
     }

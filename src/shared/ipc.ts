@@ -111,6 +111,12 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
       cleanup: z.boolean().optional(),
     }),
   }),
+  // Global variables — one text file whose NAME=value lines are available to
+  // every button and script as {{NAME}}.
+  z.object({ channel: z.literal('globals:get'), data: z.any().optional() }),
+  z.object({ channel: z.literal('globals:save'), data: z.object({ text: z.string() }) }),
+  z.object({ channel: z.literal('globals:reveal'), data: z.any().optional() }),
+
   z.object({
     channel: z.literal('macros:submit-confirm'),
     data: z.object({

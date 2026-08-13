@@ -48,6 +48,7 @@ function App() {
       loadSessions,
       refreshLogStatus,
       loadSessionPlacement,
+      loadGlobalVars,
     } = useStore.getState()
 
     void Promise.allSettled([
@@ -58,6 +59,9 @@ function App() {
       loadSshKeys(),
       loadSessions(),
       refreshLogStatus(),
+      // The button panel resolves form defaults through the globals before it
+      // prompts, so they have to be here before the first button is pressed.
+      loadGlobalVars(),
       // Placement is otherwise only learned from the broadcast sent when a
       // window is detached, so a window that loads later — or reloads — would
       // render a duplicate pane for a session already shown elsewhere.

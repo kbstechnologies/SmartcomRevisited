@@ -144,6 +144,22 @@ export default function CommandPalette({ isOpen, onClose }: CommandPaletteProps)
     },
 
     {
+      id: 'open-globals',
+      title: 'Global Variables',
+      description: 'Values every button can use as {{NAME}}',
+      category: 'settings' as const,
+      action: () => {
+        setActiveDialog('globals')
+        onClose()
+      },
+      icon: (
+        <div className="w-8 h-8 bg-teal-600 rounded-lg flex items-center justify-center">
+          <span className="text-lg">🏷️</span>
+        </div>
+      ),
+    },
+
+    {
       id: 'open-keys',
       title: 'SSH Keys',
       description: 'Generate, import and install SSH keys',
