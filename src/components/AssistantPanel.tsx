@@ -125,7 +125,10 @@ interface AssistantPanelProps {
 export default function AssistantPanel({ onOpenSettings, settingsOpen }: AssistantPanelProps) {
   const activeSessionId = useStore((state) => state.activeSessionId)
   const sessions = useStore((state) => state.sessions)
-  const pasteToSession = useStore((state) => state.pasteToSession)
+  // Insert goes through its own channel, not the clipboard paste path: it puts
+  // the suggestion on the command line and never submits it. This panel
+  // proposes commands and does not run them — src/shared/assistant-contract.ts.
+  const insertSuggestion = useStore((state) => state.insertSuggestion)
   const askAssistant = useStore((state) => state.askAssistant)
   const cancelAssistant = useStore((state) => state.cancelAssistant)
   const loadAiSettings = useStore((state) => state.loadAiSettings)
@@ -143,6 +146,8 @@ export default function AssistantPanel({ onOpenSettings, settingsOpen }: Assista
 
   const saveAiSettings = useStore((state) => state.saveAiSettings)
 
+  /** Why an Insert was refused, shown under the code block that was refused. */
+  const [insertRefusal, setInsertRefusal] = useState<{ index: number; reason: string } | null>(null)
   const [settings, setSettings] = useState<AiSettings | null>(null)
   const [keyMissing, setKeyMissing] = useState(false)
   /** Models installed in Ollama, so the picker offers what is actually there. */
@@ -416,14 +421,20 @@ export default function AssistantPanel({ onOpenSettings, settingsOpen }: Assista
                           Copy
                         </button>
                         <button
-                          onClick={() =>
-                            activeSessionId && pasteToSession(activeSessionId, segment.body)
-                          }
+                          onClick={() => {
+                            if (!activeSessionId) return
+                            setInsertRefusal(null)
+                            void insertSuggestion(activeSessionId, segment.body).then((result) => {
+                              if (!result.inserted && result.reason) {
+                                setInsertRefusal({ index: i, reason: result.reason })
+                              }
+                            })
+                          }}
                           disabled={!activeSessionId}
-                          // Sent as a paste, not as typing. A suggestion is
-                          // often several lines, and typed in they would run one
-                          // by one — this panel proposes commands, it does not
-                          // run them.
+                          // Inserted onto the command line and left there. The
+                          // main process strips any trailing newline and refuses
+                          // multi-line text the remote would run line by line —
+                          // this panel proposes commands, it does not run them.
                           title="Insert into the focused terminal without running it"
                           className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded text-gray-400 hover:text-gray-100 hover:bg-gray-700 disabled:opacity-40"
                         >
@@ -431,6 +442,12 @@ export default function AssistantPanel({ onOpenSettings, settingsOpen }: Assista
                           Insert
                         </button>
                       </div>
+
+                      {insertRefusal?.index === i && (
+                        <p className="px-2 py-1 text-[10px] text-amber-400 bg-gray-800 border-t border-gray-700">
+                          {insertRefusal.reason}
+                        </p>
+                      )}
                     </div>
                   ) : (
                     <p

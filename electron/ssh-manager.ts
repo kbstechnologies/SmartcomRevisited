@@ -789,6 +789,57 @@ export class SSHManager extends EventEmitter {
     return this.sendToSession(sessionId, preparePaste(text, session.bracketedPaste))
   }
 
+  /**
+   * Puts an assistant suggestion on the command line without running it.
+   *
+   * Separate from `pasteToSession` because the two have different contracts. A
+   * clipboard paste is the operator deliberately putting their own text on the
+   * wire, newlines and all — pasting a config block into a switch is a normal
+   * thing to want. An assistant suggestion is machine-written text the operator
+   * has not committed to yet, and the panel promises it is never run for them
+   * (see `src/shared/assistant-contract.ts`).
+   *
+   * Two rules keep that promise:
+   *
+   *  - **Trailing line terminators are stripped.** Otherwise the last command
+   *    of the suggestion submits itself, which is exactly "the assistant ran
+   *    it" from where the operator is sitting.
+   *  - **Multi-line text is refused when the remote is not in bracketed-paste
+   *    mode.** `preparePaste` turns newlines into CR, and a remote that cannot
+   *    tell a paste from typing acts on each one — a Cisco console or a PBX at
+   *    a serial prompt would run every line. Bracketed paste is what makes a
+   *    block land as text, so without it the only safe answer is no. The
+   *    operator still has Copy, and the ordinary paste path, both of which are
+   *    their own decision rather than the assistant's.
+   */
+  insertSuggestion(
+    sessionId: string,
+    text: string
+  ): { inserted: boolean; reason?: string; lines: number } {
+    const session = this.sessions.get(sessionId)
+    if (!session) return { inserted: false, reason: 'Session not found', lines: 0 }
+
+    const body = text.replace(/[\r\n]+$/, '')
+    const lines = body === '' ? 0 : body.split(/\r\n|\r|\n/).length
+
+    if (body === '') return { inserted: false, reason: 'Nothing to insert', lines: 0 }
+
+    if (lines > 1 && !session.bracketedPaste) {
+      return {
+        inserted: false,
+        lines,
+        reason:
+          'This remote cannot tell a paste from typing right now, so the lines ' +
+          'would run one by one. Use Copy and paste it yourself if that is what you want.',
+      }
+    }
+
+    const sent = this.sendToSession(sessionId, preparePaste(body, session.bracketedPaste))
+    return sent
+      ? { inserted: true, lines }
+      : { inserted: false, reason: 'Session is not connected', lines }
+  }
+
   resizeSession(sessionId: string, cols: number, rows: number): boolean {
     const session = this.sessions.get(sessionId)
     if (!session) return false

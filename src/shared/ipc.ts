@@ -55,6 +55,13 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
     channel: z.literal('sessions:paste'),
     data: z.object({ sessionId: z.string(), text: z.string() }),
   }),
+  // The assistant's Insert button, and nothing else. Distinct from
+  // `sessions:paste` because it refuses anything that would run itself — see
+  // src/shared/assistant-contract.ts.
+  z.object({
+    channel: z.literal('sessions:insert-suggestion'),
+    data: z.object({ sessionId: z.string(), text: z.string() }),
+  }),
   z.object({
     channel: z.literal('sessions:broadcast'),
     data: z.object({ sessionIds: z.array(z.string()), text: z.string() }),

@@ -192,8 +192,16 @@ interface AppStore {
   openSessions: (profileIds: string[]) => Promise<OpenSessionOutcome[]>
   closeSession: (sessionId: string) => Promise<boolean>
   sendToSession: (sessionId: string, text: string) => Promise<boolean>
-  /** Clipboard or suggested text, sent as a paste rather than as keystrokes. */
+  /** Clipboard text, sent as a paste rather than as keystrokes. */
   pasteToSession: (sessionId: string, text: string) => Promise<boolean>
+  /**
+   * The assistant's Insert button. Never submits what it inserts, and refuses
+   * anything the remote would run line by line — see assistant-contract.ts.
+   */
+  insertSuggestion: (
+    sessionId: string,
+    text: string
+  ) => Promise<{ inserted: boolean; reason?: string; lines: number }>
   broadcast: (text: string) => Promise<void>
   resizeSession: (sessionId: string, cols: number, rows: number) => Promise<boolean>
 
@@ -583,6 +591,12 @@ const useStore = create<AppStore>((set, get) => ({
     const { sent } = await invoke<{ sent: boolean }>('sessions:paste', { sessionId, text })
     return sent
   },
+
+  insertSuggestion: async (sessionId, text) =>
+    invoke<{ inserted: boolean; reason?: string; lines: number }>('sessions:insert-suggestion', {
+      sessionId,
+      text,
+    }),
 
   broadcast: async (text) => {
     const sessionIds = get()

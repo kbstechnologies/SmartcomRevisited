@@ -531,6 +531,12 @@ class SmartcomRevisitedApp {
             return { success: true, data: { sent } }
           }
 
+          case 'sessions:insert-suggestion':
+            return {
+              success: true,
+              data: this.sshManager.insertSuggestion(request.data.sessionId, request.data.text),
+            }
+
           case 'sessions:broadcast': {
             const results = request.data.sessionIds.map((id) => ({
               sessionId: id,
