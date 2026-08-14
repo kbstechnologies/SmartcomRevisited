@@ -269,6 +269,132 @@ app.on('ready', () => {
     return 'button and set removed, history kept under its name'
   })
 
+  // --- per-connection button sets, favourites and copies ---------------------
+
+  check('profile remembers its button sets', () => {
+    const set = db.saveMacroSet({ name: 'Cisco kit' })
+    const other = db.saveMacroSet({ name: 'Proxmox kit' })
+    const saved = db.saveProfile(
+      ProfileSchema.parse({
+        name: 'Assigned switch',
+        host: '192.0.2.7',
+        username: 'admin',
+        macroSetIds: [set.id!, other.id!],
+      })
+    )
+
+    const read = db.getProfile(saved.id!)!
+    assert(read.macroSetIds.length === 2, `expected 2 assigned sets, got ${read.macroSetIds.length}`)
+    assert(read.macroSetIds.includes(set.id!), 'assigned set lost')
+
+    // A deleted set must not linger as a dangling id on the connection.
+    db.deleteMacroSet(other.id!)
+    const resaved = db.saveProfile({ ...read, name: read.name })
+    assert(
+      resaved.macroSetIds.length === 1 && resaved.macroSetIds[0] === set.id,
+      `dangling set id kept: ${JSON.stringify(resaved.macroSetIds)}`
+    )
+    return `${resaved.macroSetIds.length} set kept, 1 dangling id dropped`
+  })
+
+  check('existing connections default to showing every set', () => {
+    const saved = db.saveProfile(
+      ProfileSchema.parse({ name: 'Unassigned box', host: '192.0.2.8', username: 'root' })
+    )
+    const read = db.getProfile(saved.id!)!
+    assert(Array.isArray(read.macroSetIds), 'macroSetIds is not an array')
+    assert(read.macroSetIds.length === 0, 'a new connection should name no sets')
+    return 'empty assignment reads back as []'
+  })
+
+  check('copying a button snapshots it', () => {
+    const from = db.saveMacroSet({ name: 'Copy source' })
+    const to = db.saveMacroSet({ name: 'Copy target' })
+    const original = db.saveMacro(
+      MacroSchema.parse({
+        setId: from.id!,
+        name: 'Show version',
+        steps: [{ type: 'send', text: 'show version', appendEnter: true }],
+        confirmBeforeRun: true,
+      })
+    )
+
+    const copy = db.copyMacro(original.id!, to.id!)
+    assert(copy.setId === to.id, 'copy landed in the wrong set')
+    assert(copy.id !== original.id, 'copy reused the original id')
+    assert(copy.name === 'Show version', `copy renamed unnecessarily: ${copy.name}`)
+    assert(copy.sourceMacroId === original.id, 'copy did not record its origin')
+    assert(copy.steps[0].text === 'show version', 'steps not copied')
+    assert(copy.confirmBeforeRun, 'guard not copied')
+
+    // Editing the copy must leave the original untouched.
+    db.saveMacro({ ...copy, name: 'Show version (edited)', steps: [] })
+    const untouched = db.getMacro(original.id!)!
+    assert(untouched.name === 'Show version', 'editing the copy renamed the original')
+    assert(untouched.steps.length === 1, 'editing the copy emptied the original')
+    return 'independent copy with provenance'
+  })
+
+  check('copying into the same set avoids a name clash', () => {
+    const set = db.saveMacroSet({ name: 'Clash set' })
+    const original = db.saveMacro(
+      MacroSchema.parse({ setId: set.id!, name: 'Uptime', steps: [] })
+    )
+
+    const first = db.copyMacro(original.id!, set.id!)
+    const second = db.copyMacro(original.id!, set.id!)
+    assert(first.name === 'Uptime (copy)', `unexpected first copy name: ${first.name}`)
+    assert(second.name === 'Uptime (copy 2)', `unexpected second copy name: ${second.name}`)
+    return `${first.name}, ${second.name}`
+  })
+
+  check('starring copies into favourites and un-starring removes it', () => {
+    const set = db.saveMacroSet({ name: 'Starrable' })
+    const macro = db.saveMacro(
+      MacroSchema.parse({
+        setId: set.id!,
+        name: 'Interface status',
+        steps: [{ type: 'send', text: 'show interfaces status', appendEnter: true }],
+      })
+    )
+
+    const on = db.toggleFavourite(macro.id!)
+    assert(on.favourited, 'starring did not report success')
+
+    const favourites = db.getMacroSet(on.setId)
+    assert(favourites !== null, 'favourites set was not created')
+
+    const starred = db.listMacrosInSet(on.setId)
+    assert(starred.length === 1, `expected 1 favourite, got ${starred.length}`)
+    assert(starred[0].sourceMacroId === macro.id, 'favourite lost its origin')
+
+    // Starring twice must toggle, not pile up duplicates.
+    const off = db.toggleFavourite(macro.id!)
+    assert(!off.favourited, 'second star did not un-favourite')
+    assert(db.listMacrosInSet(on.setId).length === 0, 'favourite not removed')
+    return `via set "${favourites!.name}"`
+  })
+
+  check('two buttons with the same name star independently', () => {
+    // "Interface Status" exists in a dozen shipped sets, so the star has to key
+    // on the id rather than the name or one would un-star another.
+    const a = db.saveMacroSet({ name: 'Vendor A' })
+    const b = db.saveMacroSet({ name: 'Vendor B' })
+    const first = db.saveMacro(MacroSchema.parse({ setId: a.id!, name: 'Interface Status', steps: [] }))
+    const second = db.saveMacro(MacroSchema.parse({ setId: b.id!, name: 'Interface Status', steps: [] }))
+
+    db.toggleFavourite(first.id!)
+    db.toggleFavourite(second.id!)
+    const favourites = db.listMacrosInSet(db.ensureFavouritesSet().id!)
+    assert(favourites.length === 2, `expected 2 favourites, got ${favourites.length}`)
+
+    db.toggleFavourite(first.id!)
+    const left = db.listMacrosInSet(db.ensureFavouritesSet().id!)
+    assert(left.length === 1, `un-starring one removed ${2 - left.length}`)
+    assert(left[0].sourceMacroId === second.id, 'un-starred the wrong favourite')
+    return 'name collisions kept apart'
+  })
+
   db.close()
 
   // The upgrade path is the one users cannot recover from if it is wrong: a

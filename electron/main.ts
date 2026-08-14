@@ -597,6 +597,15 @@ class SmartcomRevisitedApp {
           case 'macros:delete':
             return { success: true, data: this.db.deleteMacro(request.data.id) }
 
+          case 'macros:copy':
+            return {
+              success: true,
+              data: this.db.copyMacro(request.data.id, request.data.targetSetId, request.data.name),
+            }
+
+          case 'macros:toggle-favourite':
+            return { success: true, data: this.db.toggleFavourite(request.data.id) }
+
           case 'macros:cancel':
             this.sshManager.cancelMacro(request.data.sessionId)
             return { success: true, data: { cancelled: true } }

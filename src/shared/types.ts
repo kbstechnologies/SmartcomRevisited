@@ -66,6 +66,16 @@ export const ProfileSchema = z
 
     /** Macro run automatically once the session connects. */
     startupMacroId: optionalText,
+    /**
+     * Button sets shown while a session to this connection is in front.
+     *
+     * Empty means "no opinion — show everything", which is what an existing
+     * connection and a freshly created one both do. It is deliberately a filter
+     * rather than a grant: the sets still exist and are one click away in the
+     * panel's right-click menu, so a wrong assignment hides work, never loses
+     * it. Ids of sets this machine does not have are dropped on read.
+     */
+    macroSetIds: z.array(z.string()).default([]),
     createdAt: optionalText,
     updatedAt: optionalText,
   })
@@ -275,9 +285,34 @@ export const MacroSchema = z.object({
   /** Named icon shown on the button (see MACRO_ICONS). */
   icon: optionalText,
   confirmBeforeRun: z.boolean().default(false),
+  /**
+   * Id of the button this one was copied from, set by "copy" and by starring.
+   *
+   * Copies are independent from the moment they are made — editing one never
+   * touches the other — so this is provenance, not a link. It exists so the
+   * star can be a toggle: without it, un-starring would have to guess which
+   * favourite came from which button, and "Interface Status" exists in a dozen
+   * sets. A dangling value is harmless and is treated as "not a copy".
+   */
+  sourceMacroId: optionalText,
   createdAt: optionalText,
   updatedAt: optionalText,
 })
+
+/**
+ * The favourites set: one reserved set every install has, holding copies of the
+ * buttons the operator stars.
+ *
+ * The id is fixed rather than looked up by name so that starring can find it
+ * without a search, and so renaming it does not orphan the feature. It is
+ * exempt from the per-connection filter — a favourite is a favourite whichever
+ * host is in front, which is the whole point of starring it.
+ *
+ * On import the id is remapped like any other, so someone else's exported
+ * favourites arrive as an ordinary set rather than merging into yours.
+ */
+export const FAVOURITES_SET_ID = 'favourites'
+export const FAVOURITES_SET_NAME = 'Favourites'
 
 export const MacroSetSchema = z.object({
   id: optionalText,

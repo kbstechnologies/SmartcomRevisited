@@ -7,6 +7,7 @@ import {
 } from '@heroicons/react/24/outline'
 import { useEffect, useMemo } from 'react'
 import FieldEditor from './FieldEditor'
+import SearchableSelect from './SearchableSelect'
 import { useStore } from '../store/useStore'
 import type { Macro, MacroSet, MacroStep, MacroStepType, ScriptEntry } from '@shared/types'
 
@@ -228,7 +229,28 @@ function StepList({ steps, onChange, macros, macroSets, currentMacroId, depth }:
     onChange(next)
   }
 
-  const callableMacros = macros.filter((macro) => macro.id !== currentMacroId)
+  /**
+   * Options for the two pickers. Buttons are grouped by their set and sorted by
+   * it, so the set headings in the dropdown are contiguous — and so a search
+   * for a set name pulls up everything in it.
+   */
+  const setOptions = useMemo(
+    () => macroSets.map((set) => ({ value: set.id!, label: set.name })),
+    [macroSets]
+  )
+
+  const callableOptions = useMemo(() => {
+    const setName = new Map(macroSets.map((set) => [set.id, set.name]))
+    return macros
+      .filter((macro) => macro.id !== currentMacroId)
+      .map((macro) => ({
+        value: macro.id!,
+        label: macro.name,
+        group: setName.get(macro.setId) ?? 'Unknown set',
+        hint: macro.fields.length ? `${macro.fields.length} field(s)` : undefined,
+      }))
+      .sort((a, b) => a.group.localeCompare(b.group) || a.label.localeCompare(b.label))
+  }, [macros, macroSets, currentMacroId])
 
   // The library tree is folders-and-files; the picker wants a flat list of the
   // files, each labelled by its path relative to the library root.
@@ -579,18 +601,14 @@ function StepList({ steps, onChange, macros, macroSets, currentMacroId, depth }:
 
               {step.type === 'callMacro' && (
                 <>
-                  <select
-                    value={step.targetMacroId ?? ''}
-                    onChange={(event) => update(index, { targetMacroId: event.target.value })}
-                    className={`${inputClass} w-full`}
-                  >
-                    <option value="">— choose a button —</option>
-                    {callableMacros.map((macro) => (
-                      <option key={macro.id} value={macro.id}>
-                        {macroSets.find((set) => set.id === macro.setId)?.name ?? '?'} › {macro.name}
-                      </option>
-                    ))}
-                  </select>
+                  <SearchableSelect
+                    value={step.targetMacroId}
+                    onChange={(targetMacroId) => update(index, { targetMacroId })}
+                    options={callableOptions}
+                    placeholder="— choose a button —"
+                    countNoun="buttons"
+                    clearable
+                  />
                   <ArgsEditor
                     args={step.args ?? {}}
                     onChange={(args) => update(index, { args })}
@@ -600,18 +618,14 @@ function StepList({ steps, onChange, macros, macroSets, currentMacroId, depth }:
 
               {step.type === 'callSet' && (
                 <>
-                  <select
-                    value={step.targetSetId ?? ''}
-                    onChange={(event) => update(index, { targetSetId: event.target.value })}
-                    className={`${inputClass} w-full`}
-                  >
-                    <option value="">— choose a button set —</option>
-                    {macroSets.map((set) => (
-                      <option key={set.id} value={set.id}>
-                        {set.name}
-                      </option>
-                    ))}
-                  </select>
+                  <SearchableSelect
+                    value={step.targetSetId}
+                    onChange={(targetSetId) => update(index, { targetSetId })}
+                    options={setOptions}
+                    placeholder="— choose a button set —"
+                    countNoun="sets"
+                    clearable
+                  />
                   <ArgsEditor
                     args={step.args ?? {}}
                     onChange={(args) => update(index, { args })}

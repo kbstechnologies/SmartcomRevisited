@@ -15,7 +15,12 @@ import type {
   ConnectionBundle,
   ConnectionGroup,
 } from '../src/shared/types'
-import { BUTTON_SET_FORMAT, CONNECTION_FORMAT } from '../src/shared/types'
+import {
+  BUTTON_SET_FORMAT,
+  CONNECTION_FORMAT,
+  FAVOURITES_SET_ID,
+  FAVOURITES_SET_NAME,
+} from '../src/shared/types'
 import { remapBundle } from '../src/shared/button-sets'
 import { APP_NAME, DB_FILENAME } from '../src/shared/constants'
 
@@ -373,6 +378,8 @@ export class DatabaseManager {
     ensure('macros', 'color', 'TEXT')
     ensure('macros', 'icon', 'TEXT')
     ensure('macros', 'confirm_before_run', 'INTEGER NOT NULL DEFAULT 0')
+    // Provenance for copied and starred buttons.
+    ensure('macros', 'source_macro_id', 'TEXT')
     ensure('macro_sets', 'color', 'TEXT')
     ensure('profiles', 'key_id', 'TEXT')
     ensure('profiles', 'startup_macro_id', 'TEXT')
@@ -385,35 +392,67 @@ export class DatabaseManager {
     ensure('profiles', 'stop_bits', 'INTEGER NOT NULL DEFAULT 1')
     ensure('profiles', 'parity', "TEXT NOT NULL DEFAULT 'none'")
     ensure('profiles', 'flow_control', "TEXT NOT NULL DEFAULT 'none'")
+    // Per-connection button sets. Existing rows default to `[]`, which means
+    // "show everything" — an upgrade must not hide buttons someone was using.
+    ensure('profiles', 'macro_set_ids', "TEXT NOT NULL DEFAULT '[]'")
+  }
+
+  /**
+   * Column list shared by the profile reads, so a new field cannot be added to
+   * one and forgotten in the other.
+   */
+  private static readonly PROFILE_COLUMNS = `
+    id, name, transport, group_id as groupId,
+    host, port, username, auth_method as authMethod,
+    key_path as keyPath, key_id as keyId,
+    serial_path as serialPath, baud_rate as baudRate, data_bits as dataBits,
+    stop_bits as stopBits, parity, flow_control as flowControl,
+    startup_macro_id as startupMacroId, macro_set_ids as macroSetIds,
+    created_at as createdAt, updated_at as updatedAt
+  `
+
+  /**
+   * Turns a stored profile row into a Profile.
+   *
+   * `macro_set_ids` is JSON in a TEXT column, and a row written by an older
+   * build (or edited by hand) can hold anything — so a value that does not
+   * parse as an array of strings becomes `[]` rather than throwing, since an
+   * unreadable preference should show every button set, not break the panel.
+   */
+  private static toProfile(row: Record<string, unknown>): Profile {
+    const raw = row.macroSetIds
+    let macroSetIds: string[] = []
+    if (typeof raw === 'string' && raw.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(raw)
+        if (Array.isArray(parsed)) {
+          macroSetIds = [...new Set(parsed.filter((id): id is string => typeof id === 'string'))]
+        }
+      } catch {
+        /* keep the empty list */
+      }
+    }
+
+    return {
+      ...(DatabaseManager.stripNulls(row) as unknown as Profile),
+      macroSetIds,
+    }
   }
 
   // Profile operations
   listProfiles(): Profile[] {
-    return this.db.prepare(`
-      SELECT id, name, transport, group_id as groupId,
-             host, port, username, auth_method as authMethod,
-             key_path as keyPath, key_id as keyId,
-             serial_path as serialPath, baud_rate as baudRate, data_bits as dataBits,
-             stop_bits as stopBits, parity, flow_control as flowControl,
-             startup_macro_id as startupMacroId,
-             created_at as createdAt, updated_at as updatedAt
-      FROM profiles ORDER BY name
-    `).all().map((row) => DatabaseManager.stripNulls(row as Record<string, unknown>)) as unknown as Profile[]
+    return this.db
+      .prepare(`SELECT ${DatabaseManager.PROFILE_COLUMNS} FROM profiles ORDER BY name`)
+      .all()
+      .map((row) => DatabaseManager.toProfile(row as Record<string, unknown>))
   }
 
   getProfile(id: string): Profile | null {
-    const row = this.db.prepare(`
-      SELECT id, name, transport, group_id as groupId,
-             host, port, username, auth_method as authMethod,
-             key_path as keyPath, key_id as keyId,
-             serial_path as serialPath, baud_rate as baudRate, data_bits as dataBits,
-             stop_bits as stopBits, parity, flow_control as flowControl,
-             startup_macro_id as startupMacroId,
-             created_at as createdAt, updated_at as updatedAt
-      FROM profiles WHERE id = ?
-    `).get(id) as Record<string, unknown> | undefined
+    const row = this.db
+      .prepare(`SELECT ${DatabaseManager.PROFILE_COLUMNS} FROM profiles WHERE id = ?`)
+      .get(id) as Record<string, unknown> | undefined
 
-    return row ? (DatabaseManager.stripNulls(row) as unknown as Profile) : null
+    return row ? DatabaseManager.toProfile(row) : null
   }
 
   saveProfile(profile: Profile): Profile {
@@ -425,8 +464,8 @@ export class DatabaseManager {
       INSERT OR REPLACE INTO profiles
         (id, name, transport, group_id, host, port, username, auth_method,
          key_path, key_id, serial_path, baud_rate, data_bits, stop_bits,
-         parity, flow_control, startup_macro_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         parity, flow_control, startup_macro_id, macro_set_ids)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       profile.name,
@@ -444,7 +483,13 @@ export class DatabaseManager {
       profile.stopBits,
       profile.parity,
       profile.flowControl,
-      profile.startupMacroId ?? null
+      profile.startupMacroId ?? null,
+      // Sets that have since been deleted are dropped on the way in, so a
+      // stale id cannot sit in the row forever and silently come back to life
+      // if the same id is ever reissued.
+      JSON.stringify(
+        [...new Set(profile.macroSetIds ?? [])].filter((setId) => this.getMacroSet(setId) !== null)
+      )
     )
 
     return this.getProfile(id)!
@@ -524,6 +569,12 @@ export class DatabaseManager {
           startupMacroId: profile.startupMacroId
             ? (this.getMacro(profile.startupMacroId) ? profile.startupMacroId : undefined)
             : undefined,
+          // Same for assigned button sets — importing a bundle mints fresh set
+          // ids, so ids from the exporting machine almost never match. Keeping
+          // only the ones that resolve means a partial match still works and a
+          // total miss falls back to showing every set, rather than to a panel
+          // that is mysteriously empty on the imported connections.
+          macroSetIds: (profile.macroSetIds ?? []).filter((setId) => this.getMacroSet(setId) !== null),
           // Managed keys live in this machine's vault, so a foreign id is dropped.
           keyId: profile.keyId ? (this.getSshKey(profile.keyId) ? profile.keyId : undefined) : undefined,
         })
@@ -713,8 +764,8 @@ export class DatabaseManager {
     this.db
       .prepare(
         `INSERT INTO macros
-           (id, set_id, name, description, steps_json, placeholders_json, fields_json, color, icon, confirm_before_run)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           (id, set_id, name, description, steps_json, placeholders_json, fields_json, color, icon, confirm_before_run, source_macro_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         macro.id,
@@ -726,7 +777,9 @@ export class DatabaseManager {
         JSON.stringify(macro.fields ?? []),
         macro.color ?? null,
         macro.icon ?? null,
-        macro.confirmBeforeRun ? 1 : 0
+        macro.confirmBeforeRun ? 1 : 0,
+        // An id from the exporting machine means nothing here.
+        null
       )
   }
 
@@ -738,7 +791,7 @@ export class DatabaseManager {
   // Macro operations
   private static readonly MACRO_COLUMNS = `
     id, set_id as setId, name, description, steps_json, placeholders_json,
-    fields_json, color, icon, confirm_before_run,
+    fields_json, color, icon, confirm_before_run, source_macro_id as sourceMacroId,
     created_at as createdAt, updated_at as updatedAt
   `
 
@@ -810,21 +863,22 @@ export class DatabaseManager {
       macro.color ?? null,
       macro.icon ?? null,
       macro.confirmBeforeRun ? 1 : 0,
+      macro.sourceMacroId ?? null,
     ]
 
     if (macro.id) {
       this.db.prepare(`
         UPDATE macros
         SET set_id = ?, name = ?, description = ?, steps_json = ?, placeholders_json = ?,
-            fields_json = ?, color = ?, icon = ?, confirm_before_run = ?
+            fields_json = ?, color = ?, icon = ?, confirm_before_run = ?, source_macro_id = ?
         WHERE id = ?
       `).run(...values, macro.id)
     } else {
       macro.id = uuidv4()
       this.db.prepare(`
         INSERT INTO macros
-          (set_id, name, description, steps_json, placeholders_json, fields_json, color, icon, confirm_before_run, id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (set_id, name, description, steps_json, placeholders_json, fields_json, color, icon, confirm_before_run, source_macro_id, id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(...values, macro.id)
     }
     return this.getMacro(macro.id!)!
@@ -833,6 +887,94 @@ export class DatabaseManager {
   deleteMacro(id: string): boolean {
     const result = this.db.prepare('DELETE FROM macros WHERE id = ?').run(id)
     return result.changes > 0
+  }
+
+  // --- Favourites and copies -------------------------------------------------
+
+  /**
+   * Returns the favourites set, creating it the first time something is starred.
+   *
+   * Created on demand rather than at install time so a user who never stars
+   * anything is not given an empty set to wonder about, and so the row cannot
+   * be resurrected by a migration after someone deliberately deletes it.
+   */
+  ensureFavouritesSet(): MacroSet {
+    const existing = this.getMacroSet(FAVOURITES_SET_ID)
+    if (existing) return existing
+
+    this.db
+      .prepare('INSERT INTO macro_sets (id, name, description) VALUES (?, ?, ?)')
+      .run(FAVOURITES_SET_ID, FAVOURITES_SET_NAME, 'Buttons you starred. Shown on every connection.')
+
+    return this.getMacroSet(FAVOURITES_SET_ID)!
+  }
+
+  /**
+   * Copies a button into another set.
+   *
+   * The copy is a snapshot: steps, fields and guards are duplicated, so editing
+   * either afterwards leaves the other alone. That is the behaviour you want
+   * for "copy this Cisco button and tweak it for Arista", and it is also what
+   * makes a starred favourite safe to edit down to just the bits you use.
+   */
+  copyMacro(macroId: string, targetSetId: string, name?: string): Macro {
+    const source = this.getMacro(macroId)
+    if (!source) throw new Error('Button not found')
+    if (!this.getMacroSet(targetSetId)) throw new Error('Target button set not found')
+
+    return this.saveMacro({
+      ...source,
+      id: undefined,
+      setId: targetSetId,
+      name: name?.trim() || this.freeMacroName(targetSetId, source.name),
+      sourceMacroId: source.id,
+    })
+  }
+
+  /**
+   * A name not already used in the target set.
+   *
+   * Two buttons in one set with the same name are legal but confusing — the
+   * panel shows the name and nothing else — so a copy landing beside its
+   * original gets "(copy)", while a copy into a different set keeps the name it
+   * is known by.
+   */
+  private freeMacroName(setId: string, name: string): string {
+    const taken = (candidate: string) =>
+      this.db
+        .prepare('SELECT 1 FROM macros WHERE set_id = ? AND name = ?')
+        .get(setId, candidate) !== undefined
+
+    if (!taken(name)) return name
+    if (!taken(`${name} (copy)`)) return `${name} (copy)`
+
+    let counter = 2
+    while (taken(`${name} (copy ${counter})`)) counter++
+    return `${name} (copy ${counter})`
+  }
+
+  /**
+   * Stars or un-stars a button, returning the favourites set so the caller can
+   * refresh without a second round trip.
+   *
+   * Starring an already-starred button removes the favourite rather than making
+   * a second copy — the star in the panel is a toggle, and two identical
+   * favourites would be indistinguishable.
+   */
+  toggleFavourite(macroId: string): { favourited: boolean; setId: string } {
+    const existing = this.db
+      .prepare('SELECT id FROM macros WHERE set_id = ? AND source_macro_id = ?')
+      .all(FAVOURITES_SET_ID, macroId) as Array<{ id: string }>
+
+    if (existing.length > 0) {
+      const remove = this.db.prepare('DELETE FROM macros WHERE id = ?')
+      this.db.transaction(() => existing.forEach((row) => remove.run(row.id)))()
+      return { favourited: false, setId: FAVOURITES_SET_ID }
+    }
+
+    this.ensureFavouritesSet()
+    this.copyMacro(macroId, FAVOURITES_SET_ID)
+    return { favourited: true, setId: FAVOURITES_SET_ID }
   }
 
   // Audit log operations

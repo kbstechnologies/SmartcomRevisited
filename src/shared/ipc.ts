@@ -91,6 +91,16 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
   z.object({ channel: z.literal('macros:get'), data: z.object({ id: z.string() }) }),
   z.object({ channel: z.literal('macros:save'), data: MacroSchema }),
   z.object({ channel: z.literal('macros:delete'), data: z.object({ id: z.string() }) }),
+  z.object({
+    channel: z.literal('macros:copy'),
+    data: z.object({
+      id: z.string(),
+      targetSetId: z.string(),
+      /** Blank or absent lets the database pick a name free in the target set. */
+      name: z.string().optional(),
+    }),
+  }),
+  z.object({ channel: z.literal('macros:toggle-favourite'), data: z.object({ id: z.string() }) }),
   z.object({ channel: z.literal('macros:run'), data: MacroRunParamsSchema }),
   z.object({ channel: z.literal('macros:cancel'), data: z.object({ sessionId: z.string() }) }),
   z.object({ channel: z.literal('macros:resume'), data: z.object({ sessionId: z.string() }) }),

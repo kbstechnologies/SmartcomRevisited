@@ -215,6 +215,10 @@ interface AppStore {
   loadMacroSets: () => Promise<void>
   saveMacro: (macro: Macro) => Promise<Macro>
   deleteMacro: (id: string) => Promise<boolean>
+  /** Duplicates a button into another set. Returns the new copy. */
+  copyMacro: (id: string, targetSetId: string, name?: string) => Promise<Macro>
+  /** Stars or un-stars a button. Resolves to true when it is now a favourite. */
+  toggleFavourite: (id: string) => Promise<boolean>
   saveMacroSet: (macroSet: MacroSet) => Promise<MacroSet>
   deleteMacroSet: (id: string) => Promise<boolean>
   exportMacroSets: (setIds: string[]) => Promise<{
@@ -666,6 +670,23 @@ const useStore = create<AppStore>((set, get) => ({
     const deleted = await invoke<boolean>('macros:delete', { id })
     await get().loadMacros()
     return deleted
+  },
+
+  copyMacro: async (id, targetSetId, name) => {
+    const copy = await invoke<Macro>('macros:copy', { id, targetSetId, name })
+    await get().loadMacros()
+    return copy
+  },
+
+  toggleFavourite: async (id) => {
+    const result = await invoke<{ favourited: boolean; setId: string }>('macros:toggle-favourite', {
+      id,
+    })
+    // Starring the first button creates the favourites set, so the set list has
+    // to be reloaded too or the copy lands somewhere the panel cannot render.
+    await get().loadMacroSets()
+    await get().loadMacros()
+    return result.favourited
   },
 
   saveMacroSet: async (macroSet) => {

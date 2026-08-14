@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { clsx } from 'clsx'
-import { XMarkIcon, ArrowPathIcon } from '@heroicons/react/24/outline'
+import { XMarkIcon, ArrowPathIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline'
 import { useStore } from '../store/useStore'
+import SearchableSelect from './SearchableSelect'
 import { VAULT_SERVICE } from '@shared/constants'
 import {
   COMMON_BAUD_RATES,
@@ -41,6 +42,7 @@ const blankForm = (): FormState => ({
   parity: 'none',
   flowControl: 'none',
   startupMacroId: undefined,
+  macroSetIds: [],
   password: '',
   passphrase: '',
 })
@@ -60,6 +62,7 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
   const [form, setForm] = useState<FormState>(() =>
     profile ? { ...blankForm(), ...profile, password: '', passphrase: '' } : blankForm()
   )
+  const [setSearch, setSetSearch] = useState('')
   const [serialPorts, setSerialPorts] = useState<SerialPortInfo[]>([])
   const [portsError, setPortsError] = useState<string | null>(null)
   const [scanning, setScanning] = useState(false)
@@ -127,6 +130,34 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
   const labelClass = 'block text-xs font-medium text-gray-300 mb-1'
 
   const isSerial = form.transport === 'serial'
+
+  const startupOptions = useMemo(() => {
+    const setName = new Map(macroSets.map((set) => [set.id, set.name]))
+    return macros
+      .map((macro) => ({
+        value: macro.id!,
+        label: macro.name,
+        group: setName.get(macro.setId) ?? 'Unknown set',
+      }))
+      .sort((a, b) => a.group.localeCompare(b.group) || a.label.localeCompare(b.label))
+  }, [macros, macroSets])
+
+  const visibleSets = useMemo(() => {
+    const term = setSearch.trim().toLowerCase()
+    if (!term) return macroSets
+    return macroSets.filter(
+      (set) =>
+        set.name.toLowerCase().includes(term) || set.description?.toLowerCase().includes(term)
+    )
+  }, [macroSets, setSearch])
+
+  const toggleSet = (setId: string) =>
+    update(
+      'macroSetIds',
+      form.macroSetIds.includes(setId)
+        ? form.macroSetIds.filter((id) => id !== setId)
+        : [...form.macroSetIds, setId]
+    )
 
   return (
     <div className="fixed inset-0 z-[58] flex items-center justify-center bg-black/60 p-4">
@@ -431,20 +462,84 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
 
           <div className="pt-2 border-t border-gray-700">
             <label className={labelClass}>Startup script</label>
-            <select
-              value={form.startupMacroId ?? ''}
-              onChange={(event) => update('startupMacroId', event.target.value || undefined)}
-              className={inputClass}
-            >
-              <option value="">— none —</option>
-              {macros.map((macro) => (
-                <option key={macro.id} value={macro.id}>
-                  {macroSets.find((set) => set.id === macro.setId)?.name ?? '?'} › {macro.name}
-                </option>
-              ))}
-            </select>
+            <SearchableSelect
+              value={form.startupMacroId}
+              onChange={(id) => update('startupMacroId', id || undefined)}
+              options={startupOptions}
+              placeholder="— none —"
+              countNoun="buttons"
+              clearable
+            />
             <p className="mt-1 text-[11px] text-gray-500">
               Runs automatically once this connection is ready.
+            </p>
+          </div>
+
+          <div className="pt-2 border-t border-gray-700">
+            <label className={labelClass}>Button sets</label>
+            <p className="mb-2 text-[11px] text-gray-500">
+              Which sets the button panel shows while this connection is in front. Leave every box
+              clear to show all of them — nothing is deleted either way, and the panel&rsquo;s
+              right-click menu can still bring the rest back for one session.
+            </p>
+
+            <div className="flex items-center gap-2 mb-2">
+              <div className="relative flex-1">
+                <MagnifyingGlassIcon className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" />
+                <input
+                  value={setSearch}
+                  onChange={(event) => setSetSearch(event.target.value)}
+                  placeholder={`Search ${macroSets.length} set${macroSets.length === 1 ? '' : 's'}…`}
+                  className={`${inputClass} pl-7`}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => update('macroSetIds', [])}
+                disabled={form.macroSetIds.length === 0}
+                className="shrink-0 px-2 py-1.5 text-xs rounded border border-gray-600 text-gray-300 hover:bg-gray-700 disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                Clear
+              </button>
+            </div>
+
+            <div className="max-h-44 overflow-y-auto rounded border border-gray-700 divide-y divide-gray-800">
+              {macroSets.length === 0 && (
+                <p className="px-3 py-2 text-xs text-gray-500">No button sets yet.</p>
+              )}
+              {visibleSets.length === 0 && macroSets.length > 0 && (
+                <p className="px-3 py-2 text-xs text-gray-500">Nothing matches that search.</p>
+              )}
+              {visibleSets.map((set) => {
+                const checked = form.macroSetIds.includes(set.id!)
+                return (
+                  <label
+                    key={set.id}
+                    className="flex items-start gap-2 px-2.5 py-1.5 text-xs text-gray-200 hover:bg-gray-800/60 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleSet(set.id!)}
+                      className="mt-0.5 rounded border-gray-600 bg-gray-700 text-blue-500"
+                    />
+                    <span className="min-w-0">
+                      <span className="block truncate">{set.name}</span>
+                      {set.description && (
+                        <span className="block truncate text-[10px] text-gray-500">
+                          {set.description}
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+
+            <p className="mt-1 text-[11px] text-gray-500">
+              {form.macroSetIds.length === 0
+                ? 'All button sets will be shown.'
+                : `${form.macroSetIds.length} of ${macroSets.length} sets selected.`}
             </p>
           </div>
 
