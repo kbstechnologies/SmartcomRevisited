@@ -241,7 +241,8 @@ interface AppStore {
   generateSshKey: (input: {
     name: string
     type: 'rsa' | 'ed25519'
-    bits: number
+    /** RSA modulus size. Omitted for ed25519, whose size is fixed by the curve. */
+    bits?: number
     comment: string
     passphrase?: string
   }) => Promise<SshKey>

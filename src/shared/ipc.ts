@@ -181,7 +181,10 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
     channel: z.literal('keys:generate'),
     data: z.object({
       name: z.string().min(1),
-      type: z.enum(['rsa', 'ed25519']).default('rsa'),
+      // ed25519 by default: it is what ssh-keygen has defaulted to for years,
+      // and RSA is now the deliberate choice for older kit.
+      type: z.enum(['rsa', 'ed25519']).default('ed25519'),
+      /** RSA modulus size, ignored for ed25519 — the curve fixes its length. */
       bits: z.number().min(2048).max(8192).default(4096),
       comment: z.string().default(''),
       /** Encrypts the private key at rest, on top of the OS-backed vault. */

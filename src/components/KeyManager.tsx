@@ -9,7 +9,7 @@ import {
   ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline'
 import { useStore } from '../store/useStore'
-import type { SshKey } from '@shared/types'
+import type { SshKey, SshKeyType } from '@shared/types'
 
 interface KeyManagerProps {
   onClose: () => void
@@ -35,8 +35,10 @@ export default function KeyManager({ onClose }: KeyManagerProps) {
   const [notice, setNotice] = useState<string | null>(null)
   const [selectedKey, setSelectedKey] = useState<SshKey | null>(null)
 
-  // Generate form
+  // Generate form. ed25519 is the default: it is what ssh-keygen has defaulted
+  // to for years, and RSA is now the deliberate compatibility choice.
   const [genName, setGenName] = useState('')
+  const [genType, setGenType] = useState<SshKeyType>('ed25519')
   const [genBits, setGenBits] = useState(4096)
   const [genComment, setGenComment] = useState('')
   const [genPassphrase, setGenPassphrase] = useState('')
@@ -75,8 +77,9 @@ export default function KeyManager({ onClose }: KeyManagerProps) {
       if (!genName.trim()) throw new Error('Give the key a name')
       const key = await generateSshKey({
         name: genName.trim(),
-        type: 'rsa',
-        bits: genBits,
+        type: genType,
+        // Only meaningful for RSA; ignored for ed25519, whose size is fixed.
+        bits: genType === 'rsa' ? genBits : undefined,
         comment: genComment.trim(),
         passphrase: genPassphrase || undefined,
       })
@@ -265,32 +268,67 @@ export default function KeyManager({ onClose }: KeyManagerProps) {
           {panel === 'generate' && (
             <div className="space-y-3">
               <p className="text-xs text-gray-400">
-                Generates an RSA keypair. The private key is stored encrypted by your OS keystore
-                and never written to disk unless you export it.
+                The private key is stored encrypted by your OS keystore and never written to disk
+                unless you export it.
               </p>
+
               <input
                 value={genName}
                 onChange={(event) => setGenName(event.target.value)}
                 placeholder="Key name, e.g. prod-admin"
                 className={inputClass}
               />
-              <div className="flex gap-2">
-                <select
-                  value={genBits}
-                  onChange={(event) => setGenBits(Number(event.target.value))}
-                  className={inputClass}
-                >
-                  <option value={2048}>RSA 2048</option>
-                  <option value={3072}>RSA 3072</option>
-                  <option value={4096}>RSA 4096 (recommended)</option>
-                </select>
-                <input
-                  value={genComment}
-                  onChange={(event) => setGenComment(event.target.value)}
-                  placeholder="Comment, e.g. me@laptop"
-                  className={inputClass}
-                />
+
+              <div>
+                <label className="block text-xs font-medium text-gray-300 mb-1">Key type</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {(
+                    [
+                      ['ed25519', 'ED25519', 'Recommended'],
+                      ['rsa', 'RSA', 'Legacy compatibility'],
+                    ] as const
+                  ).map(([value, label, hint]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setGenType(value)}
+                      className={clsx(
+                        'px-3 py-2 rounded border text-left transition-colors',
+                        genType === value
+                          ? 'border-blue-500 bg-blue-600/20 text-white'
+                          : 'border-gray-600 bg-gray-800 text-gray-300 hover:bg-gray-700'
+                      )}
+                    >
+                      <span className="block text-sm font-medium">{label}</span>
+                      <span className="block text-[11px] text-gray-400">{hint}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
+
+              {/* The size only means anything for RSA, so it only appears for RSA. */}
+              {genType === 'rsa' && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-300 mb-1">Key size</label>
+                  <select
+                    value={genBits}
+                    onChange={(event) => setGenBits(Number(event.target.value))}
+                    className={inputClass}
+                  >
+                    <option value={2048}>2048 bits</option>
+                    <option value={3072}>3072 bits</option>
+                    <option value={4096}>4096 bits (recommended)</option>
+                  </select>
+                </div>
+              )}
+
+              <input
+                value={genComment}
+                onChange={(event) => setGenComment(event.target.value)}
+                placeholder="Comment, e.g. me@laptop (optional)"
+                className={inputClass}
+              />
+
               <input
                 type="password"
                 value={genPassphrase}
@@ -298,12 +336,28 @@ export default function KeyManager({ onClose }: KeyManagerProps) {
                 placeholder="Passphrase (optional, encrypts the key file itself)"
                 className={inputClass}
               />
+
+              <p className="text-[11px] text-gray-500 leading-relaxed">
+                {genType === 'ed25519' ? (
+                  <>
+                    ED25519 keys are smaller and faster than RSA and are the modern default. A few
+                    older SSH servers and embedded devices — some switches, PDUs and out-of-band
+                    cards — only understand RSA. Choose RSA for those.
+                  </>
+                ) : (
+                  <>
+                    RSA is here for equipment that predates ED25519. Prefer ED25519 unless you know
+                    the far end needs RSA.
+                  </>
+                )}
+              </p>
+
               <button
                 onClick={handleGenerate}
                 disabled={busy}
                 className="w-full px-3 py-2 text-sm rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50"
               >
-                {busy ? 'Generating...' : 'Generate keypair'}
+                {busy ? 'Generating...' : `Generate ${genType === 'rsa' ? 'RSA' : 'ED25519'} keypair`}
               </button>
             </div>
           )}

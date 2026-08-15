@@ -281,6 +281,26 @@ class SmartcomRevisitedApp {
    * Unpackaged always means "dev": load the vite server rather than the built
    * bundle, otherwise a stale dist/ silently masks the code being edited.
    */
+  /**
+   * Refuses to add a key under a name already in use.
+   *
+   * Nothing here overwrites silently — `saveSshKey` mints a fresh id, so a
+   * duplicate name would create a *second* key rather than replace the first —
+   * but two keys called "prod-admin" are indistinguishable in every picker that
+   * shows a name, and picking the wrong one fails authentication somewhere
+   * inconvenient. Refusing outright is the only outcome that cannot lose a key
+   * the user still needs; deleting the old one stays a deliberate act.
+   */
+  private assertKeyNameFree(name: string): void {
+    const clash = this.db.listSshKeys().find((key) => key.name === name.trim())
+    if (clash) {
+      throw new Error(
+        `A key named "${clash.name}" already exists (${clash.type}, ${clash.fingerprint}). ` +
+          'Choose another name, or delete that key first.'
+      )
+    }
+  }
+
   private resolveDevServerUrl(): string | undefined {
     if (app.isPackaged) return undefined
     return (
@@ -878,12 +898,17 @@ class SmartcomRevisitedApp {
           case 'keys:generate': {
             const { name, type, bits, comment, passphrase } = request.data
 
+            this.assertKeyNameFree(name)
+
             const generated = await generateKeyPair({ type, bits, comment, passphrase })
 
             const saved = this.db.saveSshKey({
               name,
               type,
-              bits,
+              // ed25519 has no size to choose — the curve fixes it — so record 0
+              // rather than the RSA default, which the key list would print as
+              // a meaningless "ed25519 4096".
+              bits: type === 'ed25519' ? 0 : bits,
               publicKey: generated.publicKey,
               fingerprint: generated.fingerprint,
               comment,
@@ -900,6 +925,8 @@ class SmartcomRevisitedApp {
 
           case 'keys:import': {
             const { name, privateKey, passphrase, comment } = request.data
+
+            this.assertKeyNameFree(name)
 
             const derived = await publicKeyFromPrivate(privateKey, passphrase, comment || name)
 

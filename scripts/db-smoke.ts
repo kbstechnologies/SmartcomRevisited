@@ -122,6 +122,68 @@ app.on('ready', () => {
     return `${bundle.profiles.length} profiles, ${bundle.groups.length} groups, no secrets`
   })
 
+  /**
+   * The field-name scan above catches a secret stored under an obvious name.
+   * This one catches key *material* wherever it appears, under any field name,
+   * at any depth — which is the failure that would actually matter, and the one
+   * a future export format is most likely to reintroduce.
+   */
+  check('no export can carry private key material', () => {
+    const key = db.saveSshKey({
+      name: 'export-leak-probe',
+      type: 'ed25519',
+      bits: 0,
+      publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIProbeProbeProbeProbeProbeProbeProbe probe@test',
+      fingerprint: 'SHA256:probeprobeprobeprobeprobeprobeprobeprobeprob',
+      comment: 'probe',
+      hasPassphrase: true,
+    })
+
+    const profile = db.saveProfile(
+      ProfileSchema.parse({
+        name: 'key-auth host',
+        host: '10.9.9.9',
+        username: 'admin',
+        authMethod: 'key',
+        keyId: key.id,
+      })
+    )
+
+    // Private keys live only in the OS vault, never in a row, so an export can
+    // only leak one if some future code path goes and fetches it.
+    const MATERIAL = [
+      'BEGIN OPENSSH PRIVATE KEY',
+      'BEGIN RSA PRIVATE KEY',
+      'BEGIN PRIVATE KEY',
+      'BEGIN EC PRIVATE KEY',
+      'openssh-key-v1',
+    ]
+
+    const sets = db.listMacroSets()
+    const bundles: Record<string, string> = {
+      connections: JSON.stringify(db.exportConnections()),
+      // The Button Exchange bundle — buttons can carry arbitrary command text,
+      // so it is the most plausible place for a pasted key to end up.
+      buttons: JSON.stringify(sets.length ? db.exportMacroSets([sets[0].id!]) : {}),
+    }
+
+    for (const [what, json] of Object.entries(bundles)) {
+      for (const marker of MATERIAL) {
+        assert(!json.includes(marker), `${what} export contains "${marker}"`)
+      }
+    }
+
+    // The reference is fine and has to survive; the material must not exist.
+    const exported = db.exportConnections().profiles.find((p) => p.id === profile.id)
+    assert(exported?.keyId === key.id, 'keyId reference lost from the export')
+    assert(
+      !JSON.stringify(exported).includes('PRIVATE'),
+      'exported profile carries something private'
+    )
+
+    return `${Object.keys(bundles).length} export kinds scanned, keyId reference intact`
+  })
+
   check('connection import renames collisions and remaps groups', () => {
     const group = db.saveConnectionGroup({ name: 'Edge', sortOrder: 1 })
     db.saveProfile(
