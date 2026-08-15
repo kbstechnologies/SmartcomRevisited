@@ -45,8 +45,6 @@
     "testserver:down": "docker compose -f test-server/docker-compose.yml down",
     "test:integration": "vitest run electron/key-manager.integration.test.ts",
     "brand": "node scripts/prepare-brand.js",
-    "buttonsets": "node tools/buttonset-gen/build.js",
-    "buttonsets:check": "node tools/buttonset-gen/build.js --check --strict",
     "test:db": "vite build -c vite.dbsmoke.config.ts && node -e \"require('fs').writeFileSync('dist-smoke/package.json','{\\\"name\\\":\\\"dbsmoke\\\",\\\"main\\\":\\\"db-smoke.js\\\"}')\" && electron dist-smoke"
   },
   "devDependencies": {

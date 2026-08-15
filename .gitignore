@@ -124,3 +124,16 @@ Thumbs.db
 /MIGRATIONS.md
 /SECURITY.md
 /TESTING.md
+
+# Button set content — kept in the working tree, deliberately not published.
+# Same reasoning as the internal documentation above, and the same trap: this
+# file is itself synced by robocopy /MIR, so the rules have to live HERE, in the
+# working tree. Adding them only to the mirror's copy lasts exactly until the
+# next sync overwrites it.
+#
+# Both the built bundles and the specs are excluded, because the specs hold the
+# same commands in source form — excluding one without the other would publish
+# the content anyway.
+/ButtonSets/
+/tools/buttonset-gen/
+/src/shared/shipped-button-sets.test.ts
