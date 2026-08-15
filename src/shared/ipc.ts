@@ -23,6 +23,16 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
     data: z.object({ profileIds: z.array(z.string()).optional() }).default({}),
   }),
   z.object({ channel: z.literal('profiles:import'), data: z.any().optional() }),
+  z.object({
+    channel: z.literal('profiles:export-securecrt'),
+    data: z
+      .object({
+        profileIds: z.array(z.string()).optional(),
+        /** Off by default: an account name leaving the machine is a choice. */
+        includeUsernames: z.boolean().default(false),
+      })
+      .default({ includeUsernames: false }),
+  }),
 
   // Connection groups
   z.object({ channel: z.literal('groups:list'), data: z.any().optional() }),

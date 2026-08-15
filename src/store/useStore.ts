@@ -179,6 +179,17 @@ interface AppStore {
   deleteProfile: (id: string) => Promise<boolean>
   testProfile: (id: string) => Promise<{ success: boolean; error?: string }>
   exportConnections: (profileIds?: string[]) => Promise<{ filePath: string; profiles: number; groups: number }>
+  /** Saved connections as a SecureCRT-importable CSV. Never carries secrets. */
+  exportConnectionsForSecureCrt: (input: {
+    profileIds?: string[]
+    includeUsernames: boolean
+  }) => Promise<{
+    filePath: string
+    readmePath: string
+    exported: number
+    skipped: Array<{ name: string; reason: string }>
+    unsupported: Array<{ name: string; reason: string }>
+  }>
   importConnections: () => Promise<{ groups: number; profiles: number; renamed: Array<{ from: string; to: string }> }>
 
   loadConnectionGroups: () => Promise<void>
@@ -507,6 +518,8 @@ const useStore = create<AppStore>((set, get) => ({
   // Sessions
   exportConnections: async (profileIds) =>
     invoke('profiles:export', { profileIds }),
+
+  exportConnectionsForSecureCrt: async (input) => invoke('profiles:export-securecrt', input),
 
   importConnections: async () => {
     const result = await invoke<{ groups: number; profiles: number; renamed: Array<{ from: string; to: string }> }>('profiles:import')

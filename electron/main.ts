@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, clipboard } from 'electron'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { hostname } from 'os'
 import { writeFileSync, readFileSync } from 'fs'
 import { keytar, getKeychainManager } from './keychain'
@@ -20,6 +20,7 @@ import {
   publicKeyFromPrivate,
   writePrivateKeyFile,
 } from './key-manager'
+import { importInstructions, toSecureCrtCsv } from '../src/shared/securecrt'
 import type { IpcResponse } from '../src/shared/ipc'
 import { IpcRequestSchema } from '../src/shared/ipc'
 import type { AuditLog, Settings } from '../src/shared/types'
@@ -394,6 +395,55 @@ class SmartcomRevisitedApp {
             const profile = this.db.getProfile(request.data.id)
             if (!profile) return { success: false, error: 'Profile not found' }
             return { success: true, data: await this.sshManager.testConnection(profile) }
+          }
+
+          case 'profiles:export-securecrt': {
+            // Saved connections only — buttons, audit history, logs, globals and
+            // assistant settings have no SecureCRT equivalent and are not tried.
+            const bundle = this.db.exportConnections(request.data.profileIds)
+            if (bundle.profiles.length === 0) {
+              return { success: false, error: 'No connections to export' }
+            }
+
+            const { csv, summary } = toSecureCrtCsv(bundle.profiles, bundle.groups, {
+              includeUsernames: request.data.includeUsernames,
+            })
+
+            if (summary.exported === 0) {
+              return {
+                success: false,
+                error:
+                  'None of the selected connections can be imported by SecureCRT. ' +
+                  `${summary.unsupported.length} unsupported, ${summary.skipped.length} incomplete.`,
+              }
+            }
+
+            const stamp = new Date().toISOString().split('T')[0]
+            const result = await dialog.showSaveDialog(this.mainWindow!, {
+              title: 'Export connections for SecureCRT',
+              defaultPath: `smartcom-connections-${stamp}.csv`,
+              filters: [{ name: 'CSV', extensions: ['csv'] }],
+            })
+            if (result.canceled || !result.filePath) {
+              return { success: false, error: 'Export cancelled' }
+            }
+
+            writeFileSync(result.filePath, csv, 'utf8')
+
+            // The instructions sit beside the file because an export is often
+            // carried to another machine and imported days later by someone
+            // else, who will not have seen whatever the UI said at the time.
+            const readmePath = result.filePath.replace(/\.csv$/i, '') + '-README.txt'
+            writeFileSync(
+              readmePath,
+              importInstructions(summary, basename(result.filePath)),
+              'utf8'
+            )
+
+            return {
+              success: true,
+              data: { filePath: result.filePath, readmePath, ...summary },
+            }
           }
 
           case 'profiles:export': {
