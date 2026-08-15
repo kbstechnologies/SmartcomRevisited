@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { FAVOURITES_SET_ID } from '@shared/types'
-import { orderSets, parseHiddenSets, resolveVisibleSets, toggleHiddenSet } from './setVisibility'
+import { FAVOURITES_SET_ID, normaliseTags } from '@shared/types'
+import {
+  orderSets,
+  parseHiddenSets,
+  resolveVisibleSets,
+  sharedTags,
+  toggleHiddenSet,
+} from './setVisibility'
 
 const ALL = ['cisco', 'linux', 'proxmox']
 
@@ -86,6 +92,154 @@ describe('resolveVisibleSets', () => {
       hidden: [FAVOURITES_SET_ID],
     })
     expect(result.visible).toEqual(['cisco'])
+  })
+})
+
+describe('tag matching', () => {
+  const TAGGED = { cisco: ['cisco', 'switching'], linux: ['linux'], proxmox: ['virtualisation'] }
+
+  it('surfaces a set that shares a tag with the connection', () => {
+    const result = resolveVisibleSets({
+      setIds: ALL,
+      assigned: [],
+      hidden: [],
+      profileTags: ['cisco'],
+      setTags: TAGGED,
+    })
+
+    expect(result.visible).toEqual(['cisco'])
+    expect(result.matchedByTag).toEqual(['cisco'])
+    expect(result.assignmentActive).toBe(true)
+  })
+
+  it('matches regardless of case and spacing on either side', () => {
+    const result = resolveVisibleSets({
+      setIds: ['edge'],
+      assigned: [],
+      hidden: [],
+      profileTags: ['  Customer Acme '],
+      setTags: { edge: ['CUSTOMER-ACME'] },
+    })
+
+    expect(result.visible).toEqual(['edge'])
+  })
+
+  it('adds to the named sets rather than replacing them', () => {
+    // Naming a set means "this one specifically"; a tag means "anything of this
+    // kind". A connection can want both, and one must not silence the other.
+    const result = resolveVisibleSets({
+      setIds: ALL,
+      assigned: ['proxmox'],
+      hidden: [],
+      profileTags: ['cisco'],
+      setTags: TAGGED,
+    })
+
+    expect(result.visible.sort()).toEqual(['cisco', 'proxmox'])
+    // Only the tag-found one is reported as such; the named one was explicit.
+    expect(result.matchedByTag).toEqual(['cisco'])
+  })
+
+  it('shows everything when the connection tags match nothing', () => {
+    // Same rule as an assignment that resolves to nothing: an empty panel looks
+    // broken, so no usable opinion means no filtering.
+    const result = resolveVisibleSets({
+      setIds: ALL,
+      assigned: [],
+      hidden: [],
+      profileTags: ['nothing-has-this'],
+      setTags: TAGGED,
+    })
+
+    expect(result.visible).toEqual(ALL)
+    expect(result.assignmentActive).toBe(false)
+    expect(result.matchedByTag).toEqual([])
+  })
+
+  it('ignores tags on the sets when the connection has none', () => {
+    const result = resolveVisibleSets({ setIds: ALL, assigned: [], hidden: [], setTags: TAGGED })
+    expect(result.visible).toEqual(ALL)
+    expect(result.assignmentActive).toBe(false)
+  })
+
+  it('matches on any shared tag, not all of them', () => {
+    const result = resolveVisibleSets({
+      setIds: ['cisco'],
+      assigned: [],
+      hidden: [],
+      profileTags: ['switching', 'production', 'eu-west'],
+      setTags: TAGGED,
+    })
+
+    expect(result.visible).toEqual(['cisco'])
+  })
+
+  it('still lets a tag-matched set be hidden by hand', () => {
+    const result = resolveVisibleSets({
+      setIds: ALL,
+      assigned: [],
+      hidden: ['cisco'],
+      profileTags: ['cisco'],
+      setTags: TAGGED,
+    })
+
+    expect(result.visible).toEqual([])
+  })
+
+  it('is lifted along with the assignment by show-everything', () => {
+    const result = resolveVisibleSets({
+      setIds: ALL,
+      assigned: [],
+      hidden: [],
+      profileTags: ['cisco'],
+      setTags: TAGGED,
+      ignoreAssignment: true,
+    })
+
+    expect(result.visible).toEqual(ALL)
+    expect(result.matchedByTag).toEqual([])
+  })
+
+  it('keeps favourites visible alongside a tag match', () => {
+    const setIds = [...ALL, FAVOURITES_SET_ID]
+    const result = resolveVisibleSets({
+      setIds,
+      assigned: [],
+      hidden: [],
+      profileTags: ['linux'],
+      setTags: TAGGED,
+    })
+
+    expect(result.visible.sort()).toEqual([FAVOURITES_SET_ID, 'linux'].sort())
+  })
+})
+
+describe('sharedTags', () => {
+  it('reports the overlap, normalised', () => {
+    expect(sharedTags(['Cisco', 'Prod'], ['cisco', 'switching'])).toEqual(['cisco'])
+  })
+
+  it('is empty when either side has none', () => {
+    expect(sharedTags([], ['cisco'])).toEqual([])
+    expect(sharedTags(['cisco'], [])).toEqual([])
+    expect(sharedTags(['cisco'], undefined)).toEqual([])
+  })
+})
+
+describe('normaliseTags', () => {
+  it('lower-cases, trims, hyphenates spaces and de-duplicates', () => {
+    expect(normaliseTags([' Cisco ', 'CISCO', 'Customer Acme', ''])).toEqual([
+      'cisco',
+      'customer-acme',
+    ])
+  })
+
+  it('sorts, so two equal tag sets compare equal', () => {
+    expect(normaliseTags(['zebra', 'alpha'])).toEqual(normaliseTags(['alpha', 'zebra']))
+  })
+
+  it('survives an absent list', () => {
+    expect(normaliseTags(undefined)).toEqual([])
   })
 })
 

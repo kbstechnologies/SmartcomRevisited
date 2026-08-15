@@ -10,7 +10,7 @@
  * show.
  */
 
-import { FAVOURITES_SET_ID } from '@shared/types'
+import { FAVOURITES_SET_ID, normaliseTags } from '@shared/types'
 
 export const HIDDEN_SETS_KEY = 'smartcom.hiddenMacroSets'
 
@@ -84,6 +84,10 @@ export interface SetFilterInput {
   assigned: string[] | undefined
   /** Ids ticked off in the right-click menu. */
   hidden: string[]
+  /** `Profile.tags` for the session in front. */
+  profileTags?: string[]
+  /** Each set's tags, keyed by set id. */
+  setTags?: Record<string, string[] | undefined>
   /**
    * Set when the operator has asked to see everything for this session,
    * overriding the connection's assignment but not the manual ticks.
@@ -98,17 +102,47 @@ export interface SetFilterResult {
   assignmentActive: boolean
   /** How many sets the assignment alone is keeping out of sight. */
   hiddenByAssignment: number
+  /** Ids matched by a shared tag rather than named outright. */
+  matchedByTag: string[]
+}
+
+/** Tags shared between a connection and a set, normalised on both sides. */
+export function sharedTags(profileTags: string[], setTags: string[] | undefined): string[] {
+  if (!profileTags.length || !setTags?.length) return []
+  const wanted = new Set(normaliseTags(profileTags))
+  return normaliseTags(setTags).filter((tag) => wanted.has(tag))
 }
 
 export function resolveVisibleSets({
   setIds,
   assigned,
   hidden,
+  profileTags = [],
+  setTags = {},
   ignoreAssignment = false,
 }: SetFilterInput): SetFilterResult {
   // Ids the profile names but this machine no longer has are ignored, so a
   // deleted set cannot leave a connection filtered down to nothing.
   const allowed = new Set((assigned ?? []).filter((id) => setIds.includes(id)))
+
+  /**
+   * Tag matches are additive with the named ids, not an alternative to them.
+   * Naming a set says "this one specifically"; a tag says "anything for this
+   * kind of box" — a connection can reasonably want both, and a set arriving
+   * later with a matching tag should appear without anyone editing the
+   * connection. That is the whole reason tags exist alongside the id list.
+   */
+  const matchedByTag: string[] = []
+  if (profileTags.length) {
+    for (const id of setIds) {
+      if (allowed.has(id)) continue
+      if (sharedTags(profileTags, setTags[id]).length > 0) {
+        allowed.add(id)
+        matchedByTag.push(id)
+      }
+    }
+  }
+
   const assignmentActive = !ignoreAssignment && allowed.size > 0
 
   // Favourites ignore the connection filter: the point of starring a button is
@@ -123,6 +157,7 @@ export function resolveVisibleSets({
     visible: permitted.filter((id) => !hidden.includes(id)),
     assignmentActive,
     hiddenByAssignment: assignmentActive ? setIds.length - permitted.length : 0,
+    matchedByTag: assignmentActive ? matchedByTag : [],
   }
 }
 

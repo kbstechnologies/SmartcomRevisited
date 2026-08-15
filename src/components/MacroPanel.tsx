@@ -29,6 +29,7 @@ import {
   orderSets,
   resolveVisibleSets,
   saveHiddenSets,
+  sharedTags,
   toggleHiddenSet,
 } from '../lib/setVisibility'
 import {
@@ -155,16 +156,21 @@ export default function MacroPanel() {
     return session ? profiles.find((profile) => profile.id === session.profileId) : undefined
   }, [sessions, activeSessionId, profiles])
 
-  const { visible, assignmentActive, hiddenByAssignment } = useMemo(
+  const { visible, assignmentActive, hiddenByAssignment, matchedByTag } = useMemo(
     () =>
       resolveVisibleSets({
         setIds: macroSets.map((set) => set.id!).filter(Boolean),
         assigned: activeProfile?.macroSetIds,
         hidden: hiddenSets,
+        profileTags: activeProfile?.tags,
+        setTags: Object.fromEntries(macroSets.map((set) => [set.id!, set.tags])),
         ignoreAssignment: showAllForSession,
       }),
     [macroSets, activeProfile, hiddenSets, showAllForSession]
   )
+
+  /** Sets on screen because of a tag rather than because they were named. */
+  const tagMatched = useMemo(() => new Set(matchedByTag), [matchedByTag])
 
   const visibleIds = useMemo(() => new Set(visible), [visible])
   const shown = orderSets(grouped.filter(({ set }) => visibleIds.has(set.id!)).map((entry) => entry.set))
@@ -281,7 +287,7 @@ export default function MacroPanel() {
     let setId = macroSets[0]?.id
 
     if (!setId) {
-      const created = await saveMacroSet({ name: 'My buttons', sortOrder: 0 } as MacroSet)
+      const created = await saveMacroSet({ name: 'My buttons', tags: [] } as unknown as MacroSet)
       setId = created.id
       flash('Created the set "My buttons" to hold it')
     }
@@ -496,6 +502,19 @@ export default function MacroPanel() {
                   )}
                   <span className="truncate">{set.name}</span>
                   <span className="text-gray-600">({items.length})</span>
+                  {/*
+                    Says why this set is here. Without it, a set appearing on one
+                    host and not another looks arbitrary — and the tag that put
+                    it there is edited in a different dialog entirely.
+                  */}
+                  {tagMatched.has(set.id!) && activeProfile && (
+                    <span
+                      title={`Matched by tag: ${sharedTags(activeProfile.tags ?? [], set.tags).join(', ')}`}
+                      className="shrink-0 px-1 py-px rounded-full bg-blue-600/25 border border-blue-500/40 text-[9px] text-blue-200"
+                    >
+                      tag
+                    </span>
+                  )}
                 </button>
                 <button
                   onClick={() => setCreatingInSet(set.id!)}

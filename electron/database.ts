@@ -20,6 +20,7 @@ import {
   CONNECTION_FORMAT,
   FAVOURITES_SET_ID,
   FAVOURITES_SET_NAME,
+  normaliseTags,
 } from '../src/shared/types'
 import { remapBundle } from '../src/shared/button-sets'
 import { APP_NAME, DB_FILENAME } from '../src/shared/constants'
@@ -381,6 +382,10 @@ export class DatabaseManager {
     // Provenance for copied and starred buttons.
     ensure('macros', 'source_macro_id', 'TEXT')
     ensure('macro_sets', 'color', 'TEXT')
+    // Tags matching sets to connections. Existing rows default to `[]`, which
+    // matches nothing — an upgrade must not start surfacing sets by itself.
+    ensure('macro_sets', 'tags', "TEXT NOT NULL DEFAULT '[]'")
+    ensure('profiles', 'tags', "TEXT NOT NULL DEFAULT '[]'")
     ensure('profiles', 'key_id', 'TEXT')
     ensure('profiles', 'startup_macro_id', 'TEXT')
     // Serial support and connection folders.
@@ -407,7 +412,7 @@ export class DatabaseManager {
     key_path as keyPath, key_id as keyId,
     serial_path as serialPath, baud_rate as baudRate, data_bits as dataBits,
     stop_bits as stopBits, parity, flow_control as flowControl,
-    startup_macro_id as startupMacroId, macro_set_ids as macroSetIds,
+    startup_macro_id as startupMacroId, macro_set_ids as macroSetIds, tags,
     created_at as createdAt, updated_at as updatedAt
   `
 
@@ -419,23 +424,36 @@ export class DatabaseManager {
    * parse as an array of strings becomes `[]` rather than throwing, since an
    * unreadable preference should show every button set, not break the panel.
    */
-  private static toProfile(row: Record<string, unknown>): Profile {
-    const raw = row.macroSetIds
-    let macroSetIds: string[] = []
-    if (typeof raw === 'string' && raw.trim()) {
-      try {
-        const parsed: unknown = JSON.parse(raw)
-        if (Array.isArray(parsed)) {
-          macroSetIds = [...new Set(parsed.filter((id): id is string => typeof id === 'string'))]
-        }
-      } catch {
-        /* keep the empty list */
-      }
+  /**
+   * Reads a JSON array of strings out of a TEXT column.
+   *
+   * Anything that is not an array of strings becomes `[]` rather than throwing:
+   * a row written by an older build, or edited by hand, should degrade to "no
+   * opinion" instead of breaking the panel that reads it.
+   */
+  private static parseStringArray(raw: unknown): string[] {
+    if (typeof raw !== 'string' || !raw.trim()) return []
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return []
+      return [...new Set(parsed.filter((item): item is string => typeof item === 'string'))]
+    } catch {
+      return []
     }
+  }
 
+  private static toProfile(row: Record<string, unknown>): Profile {
     return {
       ...(DatabaseManager.stripNulls(row) as unknown as Profile),
-      macroSetIds,
+      macroSetIds: DatabaseManager.parseStringArray(row.macroSetIds),
+      tags: normaliseTags(DatabaseManager.parseStringArray(row.tags)),
+    }
+  }
+
+  private static toMacroSet(row: Record<string, unknown>): MacroSet {
+    return {
+      ...(DatabaseManager.stripNulls(row) as unknown as MacroSet),
+      tags: normaliseTags(DatabaseManager.parseStringArray(row.tags)),
     }
   }
 
@@ -464,8 +482,8 @@ export class DatabaseManager {
       INSERT OR REPLACE INTO profiles
         (id, name, transport, group_id, host, port, username, auth_method,
          key_path, key_id, serial_path, baud_rate, data_bits, stop_bits,
-         parity, flow_control, startup_macro_id, macro_set_ids)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         parity, flow_control, startup_macro_id, macro_set_ids, tags)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       profile.name,
@@ -489,7 +507,11 @@ export class DatabaseManager {
       // if the same id is ever reissued.
       JSON.stringify(
         [...new Set(profile.macroSetIds ?? [])].filter((setId) => this.getMacroSet(setId) !== null)
-      )
+      ),
+      // Tags are *not* pruned against anything — the point of a tag is that it
+      // can name a set that does not exist here yet, and start matching the day
+      // one is installed.
+      JSON.stringify(normaliseTags(profile.tags))
     )
 
     return this.getProfile(id)!
@@ -622,24 +644,30 @@ export class DatabaseManager {
 
   // Macro Set operations
   listMacroSets(): MacroSet[] {
-    return this.db.prepare(`
-      SELECT id, name, description, color, created_at as createdAt, updated_at as updatedAt
-      FROM macro_sets ORDER BY name
-    `).all().map((row) => DatabaseManager.stripNulls(row as Record<string, unknown>)) as unknown as MacroSet[]
+    return this.db
+      .prepare(`SELECT ${DatabaseManager.MACRO_SET_COLUMNS} FROM macro_sets ORDER BY name`)
+      .all()
+      .map((row) => DatabaseManager.toMacroSet(row as Record<string, unknown>))
   }
 
   saveMacroSet(macroSet: MacroSet): MacroSet {
+    const tags = JSON.stringify(normaliseTags(macroSet.tags))
+
     if (macroSet.id) {
       this.db.prepare(`
-        UPDATE macro_sets SET name = ?, description = ?, color = ? WHERE id = ?
-      `).run(macroSet.name, macroSet.description ?? null, macroSet.color ?? null, macroSet.id)
+        UPDATE macro_sets SET name = ?, description = ?, color = ?, tags = ? WHERE id = ?
+      `).run(macroSet.name, macroSet.description ?? null, macroSet.color ?? null, tags, macroSet.id)
     } else {
       macroSet.id = uuidv4()
       this.db.prepare(`
-        INSERT INTO macro_sets (id, name, description, color) VALUES (?, ?, ?, ?)
-      `).run(macroSet.id, macroSet.name, macroSet.description ?? null, macroSet.color ?? null)
+        INSERT INTO macro_sets (id, name, description, color, tags) VALUES (?, ?, ?, ?, ?)
+      `).run(macroSet.id, macroSet.name, macroSet.description ?? null, macroSet.color ?? null, tags)
     }
-    return macroSet
+
+    // Re-read rather than echo the input: tags are normalised on the way in, so
+    // the caller must see what was actually stored or the panel would filter on
+    // one spelling while the database holds another.
+    return this.getMacroSet(macroSet.id!)!
   }
 
   // SSH key operations (metadata only; private keys live in the vault)
@@ -691,15 +719,17 @@ export class DatabaseManager {
     return this.db.prepare('DELETE FROM ssh_keys WHERE id = ?').run(id).changes > 0
   }
 
+  private static readonly MACRO_SET_COLUMNS = `
+    id, name, description, color, tags,
+    created_at as createdAt, updated_at as updatedAt
+  `
+
   getMacroSet(id: string): MacroSet | null {
     const row = this.db
-      .prepare(
-        `SELECT id, name, description, color, created_at as createdAt, updated_at as updatedAt
-         FROM macro_sets WHERE id = ?`
-      )
+      .prepare(`SELECT ${DatabaseManager.MACRO_SET_COLUMNS} FROM macro_sets WHERE id = ?`)
       .get(id) as Record<string, unknown> | undefined
 
-    return row ? (DatabaseManager.stripNulls(row) as unknown as MacroSet) : null
+    return row ? DatabaseManager.toMacroSet(row) : null
   }
 
   // --- Export / import -------------------------------------------------------
@@ -743,8 +773,8 @@ export class DatabaseManager {
     this.db.transaction(() => {
       for (const set of remapped.sets) {
         this.db
-          .prepare('INSERT INTO macro_sets (id, name, description, color) VALUES (?, ?, ?, ?)')
-          .run(set.id, set.name, set.description ?? null, set.color ?? null)
+          .prepare('INSERT INTO macro_sets (id, name, description, color, tags) VALUES (?, ?, ?, ?, ?)')
+          .run(set.id, set.name, set.description ?? null, set.color ?? null, JSON.stringify(normaliseTags(set.tags)))
       }
       for (const macro of remapped.macros) {
         this.saveMacroRow(macro)

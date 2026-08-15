@@ -369,6 +369,74 @@ app.on('ready', () => {
     return 'empty assignment reads back as []'
   })
 
+  check('tags round-trip and are normalised on both sides', () => {
+    const set = db.saveMacroSet({
+      name: 'Tagged set',
+      tags: ['  Cisco ', 'CISCO', 'Customer Acme'],
+    } as never)
+
+    // Normalised on write, so the panel filters on the same spelling the
+    // database holds — echoing the caller's input back would not prove this.
+    assert(
+      JSON.stringify(set.tags) === JSON.stringify(['cisco', 'customer-acme']),
+      `set tags not normalised: ${JSON.stringify(set.tags)}`
+    )
+    assert(
+      JSON.stringify(db.getMacroSet(set.id!)!.tags) === JSON.stringify(['cisco', 'customer-acme']),
+      'set tags lost on re-read'
+    )
+
+    const profile = db.saveProfile(
+      ProfileSchema.parse({
+        name: 'tagged host',
+        host: '10.4.4.4',
+        username: 'admin',
+        tags: ['Cisco', 'switch'],
+      })
+    )
+    assert(
+      JSON.stringify(db.getProfile(profile.id!)!.tags) === JSON.stringify(['cisco', 'switch']),
+      'profile tags lost'
+    )
+
+    // A tag naming a set that does not exist must survive — that is the point
+    // of a tag, and pruning it the way macroSetIds is pruned would break it.
+    const future = db.saveProfile(
+      ProfileSchema.parse({
+        name: 'host for a set not installed yet',
+        host: '10.4.4.5',
+        username: 'admin',
+        tags: ['nothing-carries-this'],
+      })
+    )
+    assert(
+      db.getProfile(future.id!)!.tags.includes('nothing-carries-this'),
+      'an unmatched tag was pruned'
+    )
+
+    return 'normalised on write, unmatched tags kept'
+  })
+
+  check('exported button sets carry their tags', () => {
+    const set = db.saveMacroSet({ name: 'Exportable tagged', tags: ['fortinet', 'firewall'] } as never)
+    const bundle = db.exportMacroSets([set.id!])
+    assert(
+      JSON.stringify(bundle.sets[0].tags) === JSON.stringify(['firewall', 'fortinet']),
+      `tags missing from export: ${JSON.stringify(bundle.sets[0].tags)}`
+    )
+
+    // And survive the round trip, so a shared set arrives already matching.
+    const imported = db.importMacroSets(bundle)
+    assert(imported.sets === 1, 'import did not create the set')
+    const copy = db.listMacroSets().find((s) => s.name.includes('Exportable tagged') && s.id !== set.id)
+    assert(copy !== undefined, 'imported copy not found')
+    assert(
+      JSON.stringify(copy!.tags) === JSON.stringify(['firewall', 'fortinet']),
+      `tags lost on import: ${JSON.stringify(copy!.tags)}`
+    )
+    return 'tags survive export and import'
+  })
+
   check('copying a button snapshots it', () => {
     const from = db.saveMacroSet({ name: 'Copy source' })
     const to = db.saveMacroSet({ name: 'Copy target' })

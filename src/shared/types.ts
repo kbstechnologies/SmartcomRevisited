@@ -76,6 +76,22 @@ export const ProfileSchema = z
      * it. Ids of sets this machine does not have are dropped on read.
      */
     macroSetIds: z.array(z.string()).default([]),
+    /**
+     * Labels describing what this host *is* — `cisco`, `switch`, `production`.
+     *
+     * Where `macroSetIds` names specific sets, tags say what the box is and let
+     * the sets find it. Tagging one connection `cisco` surfaces every set
+     * tagged `cisco`, including ones installed next month, which naming sets by
+     * id cannot do. The two are additive: a set shows if it is named *or*
+     * shares a tag.
+     */
+    // `normaliseTags` is declared further down; the function declaration is
+    // hoisted, and sharing it matters — two normalisers that drifted apart
+    // would show up as tags that look identical and refuse to match.
+    tags: z
+      .array(z.string())
+      .default([])
+      .transform((tags) => normaliseTags(tags)),
     createdAt: optionalText,
     updatedAt: optionalText,
   })
@@ -314,11 +330,41 @@ export const MacroSchema = z.object({
 export const FAVOURITES_SET_ID = 'favourites'
 export const FAVOURITES_SET_NAME = 'Favourites'
 
+/**
+ * Normalises a tag so "Cisco", " cisco " and "CISCO" are one tag.
+ *
+ * Tags are matched across two things a user edits in different places, months
+ * apart — a connection and a button set — so anything that makes two visually
+ * identical tags fail to match would be reported as the feature not working.
+ * Lower-cased, trimmed, inner whitespace collapsed to a single hyphen.
+ */
+export function normaliseTag(tag: string): string {
+  return tag.trim().toLowerCase().replace(/\s+/g, '-')
+}
+
+/** Cleans a list of tags: normalised, de-duplicated, blanks dropped, sorted. */
+export function normaliseTags(tags: readonly string[] | undefined): string[] {
+  return [...new Set((tags ?? []).map(normaliseTag).filter(Boolean))].sort()
+}
+
+const TagsSchema = z
+  .array(z.string())
+  .default([])
+  .transform((tags) => normaliseTags(tags))
+
 export const MacroSetSchema = z.object({
   id: optionalText,
   name: z.string().min(1),
   description: optionalText,
   color: optionalText,
+  /**
+   * Free-form labels used to match this set to connections — `cisco`,
+   * `firewall`, `customer-acme`. A set shows on any connection sharing one.
+   *
+   * Part of the exported bundle, so a shared set arrives already labelled and
+   * starts matching the recipient's hosts without them tagging anything.
+   */
+  tags: TagsSchema,
   createdAt: optionalText,
   updatedAt: optionalText,
 })

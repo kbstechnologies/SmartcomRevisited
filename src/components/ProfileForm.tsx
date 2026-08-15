@@ -3,6 +3,8 @@ import { clsx } from 'clsx'
 import { XMarkIcon, ArrowPathIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline'
 import { useStore } from '../store/useStore'
 import SearchableSelect from './SearchableSelect'
+import TagEditor from './TagEditor'
+import { sharedTags } from '../lib/setVisibility'
 import { VAULT_SERVICE } from '@shared/constants'
 import {
   COMMON_BAUD_RATES,
@@ -43,6 +45,7 @@ const blankForm = (): FormState => ({
   flowControl: 'none',
   startupMacroId: undefined,
   macroSetIds: [],
+  tags: [],
   password: '',
   passphrase: '',
 })
@@ -55,6 +58,7 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
   const macros = useStore((state) => state.macros)
   const macroSets = useStore((state) => state.macroSets)
   const groups = useStore((state) => state.connectionGroups)
+  const profiles = useStore((state) => state.profiles)
   const loadSshKeys = useStore((state) => state.loadSshKeys)
   const loadConnectionGroups = useStore((state) => state.loadConnectionGroups)
   const listSerialPorts = useStore((state) => state.listSerialPorts)
@@ -141,6 +145,28 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
       }))
       .sort((a, b) => a.group.localeCompare(b.group) || a.label.localeCompare(b.label))
   }, [macros, macroSets])
+
+  /** Every tag already in use, so both sides can agree on spelling. */
+  const knownTags = useMemo(
+    () =>
+      [
+        ...new Set([
+          ...macroSets.flatMap((set) => set.tags ?? []),
+          ...profiles.flatMap((profile) => profile.tags ?? []),
+        ]),
+      ].sort(),
+    [macroSets, profiles]
+  )
+
+  /**
+   * Sets this connection's tags currently reach. Shown live while editing —
+   * a tag that matches nothing is the most likely mistake, and finding out at
+   * the moment you type it beats finding out when the panel looks empty.
+   */
+  const matchingSets = useMemo(
+    () => macroSets.filter((set) => sharedTags(form.tags, set.tags).length > 0),
+    [macroSets, form.tags]
+  )
 
   const visibleSets = useMemo(() => {
     const term = setSearch.trim().toLowerCase()
@@ -473,6 +499,38 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
             <p className="mt-1 text-[11px] text-gray-500">
               Runs automatically once this connection is ready.
             </p>
+          </div>
+
+          <div className="pt-2 border-t border-gray-700">
+            <label className={labelClass}>Tags</label>
+            <p className="mb-2 text-[11px] text-gray-500">
+              What this host is — <span className="text-gray-400">cisco</span>,{' '}
+              <span className="text-gray-400">switch</span>,{' '}
+              <span className="text-gray-400">customer-acme</span>. Any button set sharing a tag
+              shows up here automatically, including sets installed later.
+            </p>
+            <TagEditor
+              value={form.tags}
+              onChange={(tags) => update('tags', tags)}
+              suggestions={knownTags}
+              placeholder="e.g. cisco, switch, production"
+            />
+            {matchingSets.length > 0 && (
+              <p className="mt-1.5 text-[11px] text-green-400">
+                Matches {matchingSets.length} button set{matchingSets.length === 1 ? '' : 's'}:{' '}
+                {matchingSets
+                  .slice(0, 4)
+                  .map((set) => set.name)
+                  .join(', ')}
+                {matchingSets.length > 4 && ` and ${matchingSets.length - 4} more`}
+              </p>
+            )}
+            {form.tags.length > 0 && matchingSets.length === 0 && (
+              <p className="mt-1.5 text-[11px] text-amber-400">
+                No button set carries any of these tags yet. Tag a set to match, or use the list
+                below to pick sets directly.
+              </p>
+            )}
           </div>
 
           <div className="pt-2 border-t border-gray-700">
