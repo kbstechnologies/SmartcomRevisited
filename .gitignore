@@ -137,3 +137,8 @@ Thumbs.db
 /ButtonSets/
 /tools/buttonset-gen/
 /src/shared/shipped-button-sets.test.ts
+
+# Website hand-off briefs — internal, like the documentation above. Kept at the
+# repository root rather than in release/, because `npm run clean` deletes
+# release/ wholesale and took the 1.3.0 brief with it once.
+/WEBSITE-UPDATE-*.md
