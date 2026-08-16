@@ -9,6 +9,7 @@ import {
   ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline'
 import { useStore } from '../store/useStore'
+import HostMultiSelect from './HostMultiSelect'
 import type { SshKey, SshKeyType } from '@shared/types'
 
 interface KeyManagerProps {
@@ -16,6 +17,13 @@ interface KeyManagerProps {
 }
 
 type Panel = 'list' | 'generate' | 'import' | 'deploy'
+
+/** Per-host outcome of a multi-host key install. */
+interface DeployOutcome {
+  name: string
+  ok: boolean
+  detail: string
+}
 
 export default function KeyManager({ onClose }: KeyManagerProps) {
   const sshKeys = useStore((state) => state.sshKeys)
@@ -49,8 +57,9 @@ export default function KeyManager({ onClose }: KeyManagerProps) {
   const [impPassphrase, setImpPassphrase] = useState('')
 
   // Deploy form
-  const [deployProfileId, setDeployProfileId] = useState('')
+  const [deployProfileIds, setDeployProfileIds] = useState<string[]>([])
   const [deployPassword, setDeployPassword] = useState('')
+  const [deployResults, setDeployResults] = useState<DeployOutcome[]>([])
 
   useEffect(() => {
     void loadSshKeys()
@@ -107,29 +116,71 @@ export default function KeyManager({ onClose }: KeyManagerProps) {
       return `Imported ${key.name} (${key.fingerprint})`
     })
 
+  /**
+   * Installs the key on every selected host, one at a time.
+   *
+   * Sequential rather than parallel on purpose: each host may prompt the vault,
+   * and a burst of simultaneous SSH logins from one workstation looks exactly
+   * like an attack to anything watching auth logs.
+   *
+   * One host failing must not abandon the rest — the common case for a fleet is
+   * that two boxes have a different password — so every result is collected and
+   * shown per host rather than throwing on the first error.
+   */
   const handleDeploy = () =>
     run(async () => {
       if (!selectedKey) throw new Error('Choose a key')
-      if (!deployProfileId) throw new Error('Choose a host')
+      if (deployProfileIds.length === 0) throw new Error('Choose at least one host')
 
-      // Reuse a live connection when there is one, so no password is needed.
-      const liveSession = sessions.find(
-        (session) =>
-          session.profileId === deployProfileId && session.status === 'connected'
-      )
+      const results: DeployOutcome[] = []
 
-      const result = await deploySshKey({
-        keyId: selectedKey.id!,
-        profileId: deployProfileId,
-        sessionId: liveSession?.id,
-        password: liveSession ? undefined : deployPassword || undefined,
-      })
+      for (const profileId of deployProfileIds) {
+        const profile = profiles.find((item) => item.id === profileId)
+        const name = profile?.name ?? profileId
 
+        // Reuse a live connection when there is one, so no password is needed.
+        const liveSession = sessions.find(
+          (session) => session.profileId === profileId && session.status === 'connected'
+        )
+
+        try {
+          const result = await deploySshKey({
+            keyId: selectedKey.id!,
+            profileId,
+            sessionId: liveSession?.id,
+            password: liveSession ? undefined : deployPassword || undefined,
+          })
+
+          results.push({
+            name,
+            ok: true,
+            detail:
+              result.status === 'already-present'
+                ? '— already present'
+                : '— installed',
+          })
+        } catch (deployError) {
+          results.push({
+            name,
+            ok: false,
+            detail: `— ${deployError instanceof Error ? deployError.message : 'failed'}`,
+          })
+        }
+      }
+
+      setDeployResults(results)
       setDeployPassword('')
-      setPanel('list')
-      return result.status === 'already-present'
-        ? 'Key was already in authorized_keys'
-        : 'Key installed in authorized_keys'
+
+      const installed = results.filter((item) => item.ok).length
+      const failed = results.length - installed
+
+      // The panel stays open when anything failed, so the per-host list can be
+      // read; closing it would hide exactly the information that is needed.
+      if (failed === 0) setPanel('list')
+
+      return failed === 0
+        ? `Key installed on ${installed} host${installed === 1 ? '' : 's'}`
+        : `${installed} of ${results.length} succeeded — ${failed} failed, see the list`
     })
 
   const handleDelete = async (key: SshKey) => {
@@ -142,9 +193,16 @@ export default function KeyManager({ onClose }: KeyManagerProps) {
     })
   }
 
-  const selectedProfileHasSession = sessions.some(
-    (session) => session.profileId === deployProfileId && session.status === 'connected'
-  )
+  /**
+   * Selected hosts with no open session. These are the ones a password is
+   * needed for, and the count decides whether the field is asked for at all.
+   */
+  const needPassword = deployProfileIds
+    .filter(
+      (id) => !sessions.some((session) => session.profileId === id && session.status === 'connected')
+    )
+    .map((id) => profiles.find((profile) => profile.id === id))
+    .filter((profile): profile is NonNullable<typeof profile> => Boolean(profile))
 
   return (
     <div className="fixed inset-0 z-[55] flex items-center justify-center bg-black/60 p-4">
@@ -216,9 +274,13 @@ export default function KeyManager({ onClose }: KeyManagerProps) {
                       <button
                         onClick={() => {
                           setSelectedKey(key)
+                          // Clear the previous run's outcome, or a fresh deploy
+                          // opens showing results from an unrelated key.
+                          setDeployResults([])
+                          setDeployProfileIds([])
                           setPanel('deploy')
                         }}
-                        title="Install on a host"
+                        title="Install on one or more hosts"
                         className="p-1.5 rounded bg-gray-700 text-gray-300 hover:bg-gray-600"
                       >
                         <ArrowUpTrayIcon className="w-3.5 h-3.5" />
@@ -401,50 +463,98 @@ export default function KeyManager({ onClose }: KeyManagerProps) {
           {panel === 'deploy' && selectedKey && (
             <div className="space-y-3">
               <p className="text-xs text-gray-400">
-                Appends <span className="text-gray-200">{selectedKey.name}</span> to the host&apos;s{' '}
-                <code className="text-gray-300">~/.ssh/authorized_keys</code>, creating it with the
-                right permissions. Skipped if already present.
+                Appends <span className="text-gray-200">{selectedKey.name}</span> to each
+                host&apos;s <code className="text-gray-300">~/.ssh/authorized_keys</code>, creating
+                it with the right permissions. Skipped where already present.
               </p>
-              <select
-                value={deployProfileId}
-                onChange={(event) => setDeployProfileId(event.target.value)}
-                className={inputClass}
-              >
-                <option value="">— choose a host —</option>
-                {profiles.map((profile) => (
-                  <option key={profile.id} value={profile.id}>
-                    {profile.name} ({profile.username}@{profile.host})
-                  </option>
-                ))}
-              </select>
 
-              {deployProfileId && selectedProfileHasSession ? (
-                <p className="text-xs text-green-400">
-                  Using the open session for this host — no password needed.
-                </p>
-              ) : (
-                <input
-                  type="password"
-                  value={deployPassword}
-                  onChange={(event) => setDeployPassword(event.target.value)}
-                  placeholder="Password for this host (used once, not stored)"
-                  className={inputClass}
-                />
+              <HostMultiSelect
+                profiles={profiles}
+                selected={deployProfileIds}
+                onChange={setDeployProfileIds}
+                hasSession={(id) =>
+                  sessions.some((s) => s.profileId === id && s.status === 'connected')
+                }
+              />
+
+              {deployProfileIds.length > 0 && (
+                <>
+                  {needPassword.length === 0 ? (
+                    <p className="text-xs text-green-400">
+                      Every selected host has an open session — no password needed.
+                    </p>
+                  ) : (
+                    <div className="space-y-1">
+                      <input
+                        type="password"
+                        value={deployPassword}
+                        onChange={(event) => setDeployPassword(event.target.value)}
+                        placeholder={
+                          needPassword.length === 1
+                            ? `Password for ${needPassword[0].name} (used once, not stored)`
+                            : `Password for the ${needPassword.length} hosts without a session`
+                        }
+                        className={inputClass}
+                      />
+                      {needPassword.length > 1 && (
+                        // Being explicit beats a silent run of failures: one
+                        // password across several hosts only works when they
+                        // genuinely share it.
+                        <p className="text-[11px] text-amber-400">
+                          The same password is tried on {needPassword.length} hosts:{' '}
+                          {needPassword.map((profile) => profile.name).join(', ')}. Hosts that
+                          reject it are reported individually.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {deployResults.length > 0 && (
+                <div className="rounded border border-gray-700 divide-y divide-gray-800 max-h-40 overflow-y-auto">
+                  {deployResults.map((result) => (
+                    <div
+                      key={result.name}
+                      className="flex items-start gap-2 px-2.5 py-1.5 text-[11px]"
+                    >
+                      <span
+                        className={clsx(
+                          'mt-0.5 w-1.5 h-1.5 rounded-full shrink-0',
+                          result.ok ? 'bg-green-400' : 'bg-red-400'
+                        )}
+                      />
+                      <span className="min-w-0">
+                        <span className="text-gray-200">{result.name}</span>
+                        <span className={clsx('ml-1', result.ok ? 'text-gray-400' : 'text-red-300')}>
+                          {result.detail}
+                        </span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
               )}
 
               <div className="flex gap-2">
                 <button
-                  onClick={() => setPanel('list')}
+                  onClick={() => {
+                    setDeployResults([])
+                    setPanel('list')
+                  }}
                   className="flex-1 px-3 py-2 text-sm rounded border border-gray-600 text-gray-300 hover:bg-gray-700"
                 >
                   Back
                 </button>
                 <button
                   onClick={handleDeploy}
-                  disabled={busy || !deployProfileId}
+                  disabled={busy || deployProfileIds.length === 0}
                   className="flex-1 px-3 py-2 text-sm rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50"
                 >
-                  {busy ? 'Installing...' : 'Install key'}
+                  {busy
+                    ? 'Installing...'
+                    : `Install on ${deployProfileIds.length || 'no'} host${
+                        deployProfileIds.length === 1 ? '' : 's'
+                      }`}
                 </button>
               </div>
             </div>

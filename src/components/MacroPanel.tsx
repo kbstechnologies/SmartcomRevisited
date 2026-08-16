@@ -79,6 +79,8 @@ export default function MacroPanel() {
   const [editingMacro, setEditingMacro] = useState<Macro | null>(null)
   const [creatingInSet, setCreatingInSet] = useState<string | null>(null)
   const [showSetForm, setShowSetForm] = useState(false)
+  /** Existing set open for editing — name, description and tags. */
+  const [editingSet, setEditingSet] = useState<MacroSet | null>(null)
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [prompting, setPrompting] = useState<{ macro: Macro; fields: FormField[] } | null>(null)
@@ -524,6 +526,13 @@ export default function MacroPanel() {
                   <PlusIcon className="w-3.5 h-3.5" />
                 </button>
                 <button
+                  onClick={() => setEditingSet(set)}
+                  title="Edit this set — name, description and tags"
+                  className="p-0.5 rounded text-gray-500 hover:text-gray-200 hover:bg-gray-700"
+                >
+                  <PencilSquareIcon className="w-3.5 h-3.5" />
+                </button>
+                <button
                   onClick={() => handleExport([set.id!])}
                   title="Export this set"
                   className="p-0.5 rounded text-gray-500 hover:text-gray-200 hover:bg-gray-700"
@@ -701,6 +710,26 @@ export default function MacroPanel() {
             setCreatingInSet(null)
           }}
         />
+      )}
+
+      {/*
+        Editing an existing set was unreachable until 1.4.1 — the form only ever
+        opened blank. That made tags unusable on the sets that most need them:
+        every shipped bundle, which cannot be re-created by hand.
+      */}
+      {editingSet && (
+        <div className="fixed inset-0 z-[58] flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-lg max-h-[88vh] overflow-y-auto rounded-lg border border-gray-700 shadow-xl">
+            <MacroSetForm
+              macroSet={editingSet}
+              onClose={() => setEditingSet(null)}
+              onSave={() => {
+                setEditingSet(null)
+                void loadMacroSets()
+              }}
+            />
+          </div>
+        </div>
       )}
 
       {showSetForm && (
