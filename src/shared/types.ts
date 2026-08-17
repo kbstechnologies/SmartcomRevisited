@@ -66,6 +66,32 @@ export const ProfileSchema = z
 
     /** Macro run automatically once the session connects. */
     startupMacroId: optionalText,
+    /**
+     * Button sets shown while a session to this connection is in front.
+     *
+     * Empty means "no opinion — show everything", which is what an existing
+     * connection and a freshly created one both do. It is deliberately a filter
+     * rather than a grant: the sets still exist and are one click away in the
+     * panel's right-click menu, so a wrong assignment hides work, never loses
+     * it. Ids of sets this machine does not have are dropped on read.
+     */
+    macroSetIds: z.array(z.string()).default([]),
+    /**
+     * Labels describing what this host *is* — `cisco`, `switch`, `production`.
+     *
+     * Where `macroSetIds` names specific sets, tags say what the box is and let
+     * the sets find it. Tagging one connection `cisco` surfaces every set
+     * tagged `cisco`, including ones installed next month, which naming sets by
+     * id cannot do. The two are additive: a set shows if it is named *or*
+     * shares a tag.
+     */
+    // `normaliseTags` is declared further down; the function declaration is
+    // hoisted, and sharing it matters — two normalisers that drifted apart
+    // would show up as tags that look identical and refuse to match.
+    tags: z
+      .array(z.string())
+      .default([])
+      .transform((tags) => normaliseTags(tags)),
     createdAt: optionalText,
     updatedAt: optionalText,
   })
@@ -275,15 +301,70 @@ export const MacroSchema = z.object({
   /** Named icon shown on the button (see MACRO_ICONS). */
   icon: optionalText,
   confirmBeforeRun: z.boolean().default(false),
+  /**
+   * Id of the button this one was copied from, set by "copy" and by starring.
+   *
+   * Copies are independent from the moment they are made — editing one never
+   * touches the other — so this is provenance, not a link. It exists so the
+   * star can be a toggle: without it, un-starring would have to guess which
+   * favourite came from which button, and "Interface Status" exists in a dozen
+   * sets. A dangling value is harmless and is treated as "not a copy".
+   */
+  sourceMacroId: optionalText,
   createdAt: optionalText,
   updatedAt: optionalText,
 })
+
+/**
+ * The favourites set: one reserved set every install has, holding copies of the
+ * buttons the operator stars.
+ *
+ * The id is fixed rather than looked up by name so that starring can find it
+ * without a search, and so renaming it does not orphan the feature. It is
+ * exempt from the per-connection filter — a favourite is a favourite whichever
+ * host is in front, which is the whole point of starring it.
+ *
+ * On import the id is remapped like any other, so someone else's exported
+ * favourites arrive as an ordinary set rather than merging into yours.
+ */
+export const FAVOURITES_SET_ID = 'favourites'
+export const FAVOURITES_SET_NAME = 'Favourites'
+
+/**
+ * Normalises a tag so "Cisco", " cisco " and "CISCO" are one tag.
+ *
+ * Tags are matched across two things a user edits in different places, months
+ * apart — a connection and a button set — so anything that makes two visually
+ * identical tags fail to match would be reported as the feature not working.
+ * Lower-cased, trimmed, inner whitespace collapsed to a single hyphen.
+ */
+export function normaliseTag(tag: string): string {
+  return tag.trim().toLowerCase().replace(/\s+/g, '-')
+}
+
+/** Cleans a list of tags: normalised, de-duplicated, blanks dropped, sorted. */
+export function normaliseTags(tags: readonly string[] | undefined): string[] {
+  return [...new Set((tags ?? []).map(normaliseTag).filter(Boolean))].sort()
+}
+
+const TagsSchema = z
+  .array(z.string())
+  .default([])
+  .transform((tags) => normaliseTags(tags))
 
 export const MacroSetSchema = z.object({
   id: optionalText,
   name: z.string().min(1),
   description: optionalText,
   color: optionalText,
+  /**
+   * Free-form labels used to match this set to connections — `cisco`,
+   * `firewall`, `customer-acme`. A set shows on any connection sharing one.
+   *
+   * Part of the exported bundle, so a shared set arrives already labelled and
+   * starts matching the recipient's hosts without them tagging anything.
+   */
+  tags: TagsSchema,
   createdAt: optionalText,
   updatedAt: optionalText,
 })

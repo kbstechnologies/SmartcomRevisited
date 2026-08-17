@@ -37,6 +37,7 @@ jobs:
             command: npm run package:linux
             artifacts: |
               release/*.AppImage
+              release/*.AppImage.zsync
               release/*.deb
               release/*.rpm
               release/latest-linux.yml
@@ -49,10 +50,11 @@ jobs:
           node-version: 20
           cache: npm
 
-      # rpmbuild is not on the ubuntu image by default and the rpm target needs it.
+      # rpmbuild is not on the ubuntu image by default and the rpm target needs
+      # it; zsync builds the AppImage update metadata in the step below.
       - name: Install Linux packaging tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y rpm
+        run: sudo apt-get update && sudo apt-get install -y rpm zsync
 
       - name: Install dependencies
         run: npm ci
@@ -66,6 +68,20 @@ jobs:
           # Unsigned builds; supply certificates as secrets to enable signing.
           CSC_IDENTITY_AUTO_DISCOVERY: false
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # electron-builder writes latest-linux.yml, which is the *in-app* updater's
+      # feed. It does not write the AppImage's own update mechanism — the
+      # .upd_info ELF section is left zeroed and no .zsync is produced — so
+      # without this step a released AppImage is invisible to AppImageUpdate and
+      # to managers like KEM-A AppManager. See tools/APPIMAGE-UPDATES.md.
+      - name: Add AppImage update information
+        if: runner.os == 'Linux'
+        run: |
+          set -e
+          appimage=$(ls release/*.AppImage)
+          node tools/appimage-update-info.js "$appimage"
+          readelf -p .upd_info "$appimage" | grep -q 'gh-releases-zsync' \
+            || { echo "update information missing from $appimage"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:

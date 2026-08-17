@@ -12,7 +12,9 @@ import {
   TrashIcon,
   ChevronRightIcon,
   ChevronDownIcon,
+  TableCellsIcon,
 } from '@heroicons/react/24/outline'
+import SecureCrtExportDialog from './SecureCrtExportDialog'
 import { useStore } from '../store/useStore'
 import ProfileForm from './ProfileForm'
 import GroupManager from './GroupManager'
@@ -35,6 +37,7 @@ export default function ProfileSelector({ onClose, onConnected }: ProfileSelecto
   const connectionGroups = useStore((state) => state.connectionGroups)
   const loadConnectionGroups = useStore((state) => state.loadConnectionGroups)
   const exportConnections = useStore((state) => state.exportConnections)
+  const exportConnectionsForSecureCrt = useStore((state) => state.exportConnectionsForSecureCrt)
   const importConnections = useStore((state) => state.importConnections)
   const deleteProfile = useStore((state) => state.deleteProfile)
 
@@ -46,6 +49,7 @@ export default function ProfileSelector({ onClose, onConnected }: ProfileSelecto
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [showGroups, setShowGroups] = useState(false)
+  const [showSecureCrt, setShowSecureCrt] = useState(false)
   /** Connections awaiting the delete confirmation shown above the footer. */
   const [pendingDelete, setPendingDelete] = useState<Profile[] | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -159,6 +163,38 @@ export default function ProfileSelector({ onClose, onConnected }: ProfileSelecto
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Export failed'
       if (!message.includes('cancelled')) setErrors([message])
+    }
+  }
+
+  /**
+   * Saved connections only, and the summary names what did not make it. A
+   * quiet success reads very differently from a serial connection discovered
+   * missing later, once someone is already working in SecureCRT.
+   */
+  const handleSecureCrtExport = async (options: { includeUsernames: boolean }) => {
+    setErrors([])
+    try {
+      const result = await exportConnectionsForSecureCrt({
+        profileIds: selected.size > 0 ? Array.from(selected) : undefined,
+        includeUsernames: options.includeUsernames,
+      })
+      setShowSecureCrt(false)
+
+      const parts = [`Exported ${result.exported} connection(s) to ${result.filePath}`]
+      if (result.unsupported.length > 0) {
+        const names = result.unsupported.map((item) => item.name).join(', ')
+        parts.push(`${result.unsupported.length} not supported by SecureCRT: ${names}`)
+      }
+      if (result.skipped.length > 0) {
+        const names = result.skipped.map((item) => item.name).join(', ')
+        parts.push(`${result.skipped.length} skipped: ${names}`)
+      }
+      parts.push('Import steps are in the README saved beside the CSV.')
+      setNotice(parts.join(' — '))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Export failed'
+      if (!message.includes('cancelled')) setErrors([message])
+      setShowSecureCrt(false)
     }
   }
 
@@ -329,7 +365,25 @@ export default function ProfileSelector({ onClose, onConnected }: ProfileSelecto
             <ArrowUpTrayIcon className="w-3.5 h-3.5" />
             Export{selected.size > 0 ? ` (${selected.size})` : ''}
           </button>
+          <button
+            onClick={() => setShowSecureCrt(true)}
+            disabled={profiles.length === 0}
+            title="Export saved connections as a CSV for SecureCRT's text import wizard"
+            className="flex items-center gap-1 px-2 py-1.5 text-xs rounded bg-gray-700 border border-gray-600 text-gray-200 hover:bg-gray-600 disabled:opacity-40"
+          >
+            <TableCellsIcon className="w-3.5 h-3.5" />
+            SecureCRT
+          </button>
         </div>
+
+        {showSecureCrt && (
+          <SecureCrtExportDialog
+            count={selected.size > 0 ? selected.size : profiles.length}
+            selectionOnly={selected.size > 0}
+            onCancel={() => setShowSecureCrt(false)}
+            onExport={handleSecureCrtExport}
+          />
+        )}
 
         {filtered.length > 0 && (
           <label className="flex items-center gap-2 px-4 py-2 text-xs text-gray-400 border-b border-gray-700 cursor-pointer hover:bg-gray-750">

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, clipboard } from 'electron'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { hostname } from 'os'
 import { writeFileSync, readFileSync } from 'fs'
 import { keytar, getKeychainManager } from './keychain'
@@ -20,6 +20,7 @@ import {
   publicKeyFromPrivate,
   writePrivateKeyFile,
 } from './key-manager'
+import { importInstructions, toSecureCrtCsv } from '../src/shared/securecrt'
 import type { IpcResponse } from '../src/shared/ipc'
 import { IpcRequestSchema } from '../src/shared/ipc'
 import type { AuditLog, Settings } from '../src/shared/types'
@@ -281,6 +282,26 @@ class SmartcomRevisitedApp {
    * Unpackaged always means "dev": load the vite server rather than the built
    * bundle, otherwise a stale dist/ silently masks the code being edited.
    */
+  /**
+   * Refuses to add a key under a name already in use.
+   *
+   * Nothing here overwrites silently — `saveSshKey` mints a fresh id, so a
+   * duplicate name would create a *second* key rather than replace the first —
+   * but two keys called "prod-admin" are indistinguishable in every picker that
+   * shows a name, and picking the wrong one fails authentication somewhere
+   * inconvenient. Refusing outright is the only outcome that cannot lose a key
+   * the user still needs; deleting the old one stays a deliberate act.
+   */
+  private assertKeyNameFree(name: string): void {
+    const clash = this.db.listSshKeys().find((key) => key.name === name.trim())
+    if (clash) {
+      throw new Error(
+        `A key named "${clash.name}" already exists (${clash.type}, ${clash.fingerprint}). ` +
+          'Choose another name, or delete that key first.'
+      )
+    }
+  }
+
   private resolveDevServerUrl(): string | undefined {
     if (app.isPackaged) return undefined
     return (
@@ -374,6 +395,55 @@ class SmartcomRevisitedApp {
             const profile = this.db.getProfile(request.data.id)
             if (!profile) return { success: false, error: 'Profile not found' }
             return { success: true, data: await this.sshManager.testConnection(profile) }
+          }
+
+          case 'profiles:export-securecrt': {
+            // Saved connections only — buttons, audit history, logs, globals and
+            // assistant settings have no SecureCRT equivalent and are not tried.
+            const bundle = this.db.exportConnections(request.data.profileIds)
+            if (bundle.profiles.length === 0) {
+              return { success: false, error: 'No connections to export' }
+            }
+
+            const { csv, summary } = toSecureCrtCsv(bundle.profiles, bundle.groups, {
+              includeUsernames: request.data.includeUsernames,
+            })
+
+            if (summary.exported === 0) {
+              return {
+                success: false,
+                error:
+                  'None of the selected connections can be imported by SecureCRT. ' +
+                  `${summary.unsupported.length} unsupported, ${summary.skipped.length} incomplete.`,
+              }
+            }
+
+            const stamp = new Date().toISOString().split('T')[0]
+            const result = await dialog.showSaveDialog(this.mainWindow!, {
+              title: 'Export connections for SecureCRT',
+              defaultPath: `smartcom-connections-${stamp}.csv`,
+              filters: [{ name: 'CSV', extensions: ['csv'] }],
+            })
+            if (result.canceled || !result.filePath) {
+              return { success: false, error: 'Export cancelled' }
+            }
+
+            writeFileSync(result.filePath, csv, 'utf8')
+
+            // The instructions sit beside the file because an export is often
+            // carried to another machine and imported days later by someone
+            // else, who will not have seen whatever the UI said at the time.
+            const readmePath = result.filePath.replace(/\.csv$/i, '') + '-README.txt'
+            writeFileSync(
+              readmePath,
+              importInstructions(summary, basename(result.filePath)),
+              'utf8'
+            )
+
+            return {
+              success: true,
+              data: { filePath: result.filePath, readmePath, ...summary },
+            }
           }
 
           case 'profiles:export': {
@@ -596,6 +666,15 @@ class SmartcomRevisitedApp {
 
           case 'macros:delete':
             return { success: true, data: this.db.deleteMacro(request.data.id) }
+
+          case 'macros:copy':
+            return {
+              success: true,
+              data: this.db.copyMacro(request.data.id, request.data.targetSetId, request.data.name),
+            }
+
+          case 'macros:toggle-favourite':
+            return { success: true, data: this.db.toggleFavourite(request.data.id) }
 
           case 'macros:cancel':
             this.sshManager.cancelMacro(request.data.sessionId)
@@ -869,12 +948,17 @@ class SmartcomRevisitedApp {
           case 'keys:generate': {
             const { name, type, bits, comment, passphrase } = request.data
 
+            this.assertKeyNameFree(name)
+
             const generated = await generateKeyPair({ type, bits, comment, passphrase })
 
             const saved = this.db.saveSshKey({
               name,
               type,
-              bits,
+              // ed25519 has no size to choose — the curve fixes it — so record 0
+              // rather than the RSA default, which the key list would print as
+              // a meaningless "ed25519 4096".
+              bits: type === 'ed25519' ? 0 : bits,
               publicKey: generated.publicKey,
               fingerprint: generated.fingerprint,
               comment,
@@ -891,6 +975,8 @@ class SmartcomRevisitedApp {
 
           case 'keys:import': {
             const { name, privateKey, passphrase, comment } = request.data
+
+            this.assertKeyNameFree(name)
 
             const derived = await publicKeyFromPrivate(privateKey, passphrase, comment || name)
 

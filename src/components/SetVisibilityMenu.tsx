@@ -14,6 +14,18 @@ interface Props {
   onShowAll: () => void
   onHideAll: () => void
   onClose: () => void
+  /**
+   * Set when the connection in front is narrowing the list. Without saying so,
+   * the tick list looks broken: sets are ticked but not on screen.
+   */
+  assignment?: {
+    profileName: string
+    /** How many sets the connection is keeping out of sight. */
+    count: number
+    /** True once the operator has lifted the restriction for this session. */
+    lifted: boolean
+    onToggle: () => void
+  }
 }
 
 /**
@@ -32,6 +44,7 @@ export default function SetVisibilityMenu({
   onShowAll,
   onHideAll,
   onClose,
+  assignment,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null)
   const [position, setPosition] = useState({ left: x, top: y })
@@ -80,6 +93,31 @@ export default function SetVisibilityMenu({
       className="fixed z-50 w-60 max-h-[70vh] overflow-y-auto rounded border border-gray-600 bg-gray-800 shadow-xl py-1"
     >
       <p className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">Show button sets</p>
+
+      {assignment && (
+        <div className="mx-2 my-1 rounded bg-gray-900/70 border border-gray-700 px-2 py-1.5">
+          <p className="text-[11px] text-gray-400">
+            {assignment.lifted ? (
+              <>
+                Showing every set. {assignment.profileName} is normally limited to its assigned
+                ones.
+              </>
+            ) : (
+              <>
+                Limited to the sets assigned to <span className="text-gray-200">{assignment.profileName}</span> —{' '}
+                {assignment.count} other{assignment.count === 1 ? '' : 's'} out of sight.
+              </>
+            )}
+          </p>
+          <button
+            type="button"
+            onClick={assignment.onToggle}
+            className="mt-1 text-[11px] text-blue-400 hover:text-blue-300"
+          >
+            {assignment.lifted ? 'Use this connection’s sets again' : 'Show every set for this session'}
+          </button>
+        </div>
+      )}
 
       {sets.length === 0 && (
         <p className="px-3 py-2 text-[11px] text-gray-500">No button sets yet.</p>

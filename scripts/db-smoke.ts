@@ -122,6 +122,68 @@ app.on('ready', () => {
     return `${bundle.profiles.length} profiles, ${bundle.groups.length} groups, no secrets`
   })
 
+  /**
+   * The field-name scan above catches a secret stored under an obvious name.
+   * This one catches key *material* wherever it appears, under any field name,
+   * at any depth — which is the failure that would actually matter, and the one
+   * a future export format is most likely to reintroduce.
+   */
+  check('no export can carry private key material', () => {
+    const key = db.saveSshKey({
+      name: 'export-leak-probe',
+      type: 'ed25519',
+      bits: 0,
+      publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIProbeProbeProbeProbeProbeProbeProbe probe@test',
+      fingerprint: 'SHA256:probeprobeprobeprobeprobeprobeprobeprobeprob',
+      comment: 'probe',
+      hasPassphrase: true,
+    })
+
+    const profile = db.saveProfile(
+      ProfileSchema.parse({
+        name: 'key-auth host',
+        host: '10.9.9.9',
+        username: 'admin',
+        authMethod: 'key',
+        keyId: key.id,
+      })
+    )
+
+    // Private keys live only in the OS vault, never in a row, so an export can
+    // only leak one if some future code path goes and fetches it.
+    const MATERIAL = [
+      'BEGIN OPENSSH PRIVATE KEY',
+      'BEGIN RSA PRIVATE KEY',
+      'BEGIN PRIVATE KEY',
+      'BEGIN EC PRIVATE KEY',
+      'openssh-key-v1',
+    ]
+
+    const sets = db.listMacroSets()
+    const bundles: Record<string, string> = {
+      connections: JSON.stringify(db.exportConnections()),
+      // The Button Exchange bundle — buttons can carry arbitrary command text,
+      // so it is the most plausible place for a pasted key to end up.
+      buttons: JSON.stringify(sets.length ? db.exportMacroSets([sets[0].id!]) : {}),
+    }
+
+    for (const [what, json] of Object.entries(bundles)) {
+      for (const marker of MATERIAL) {
+        assert(!json.includes(marker), `${what} export contains "${marker}"`)
+      }
+    }
+
+    // The reference is fine and has to survive; the material must not exist.
+    const exported = db.exportConnections().profiles.find((p) => p.id === profile.id)
+    assert(exported?.keyId === key.id, 'keyId reference lost from the export')
+    assert(
+      !JSON.stringify(exported).includes('PRIVATE'),
+      'exported profile carries something private'
+    )
+
+    return `${Object.keys(bundles).length} export kinds scanned, keyId reference intact`
+  })
+
   check('connection import renames collisions and remaps groups', () => {
     const group = db.saveConnectionGroup({ name: 'Edge', sortOrder: 1 })
     db.saveProfile(
@@ -267,6 +329,200 @@ app.on('ready', () => {
     assert(history.length === 1, 'audit entry lost with the button')
     assert(!history[0].macroId, 'audit entry still points at a deleted button')
     return 'button and set removed, history kept under its name'
+  })
+
+  // --- per-connection button sets, favourites and copies ---------------------
+
+  check('profile remembers its button sets', () => {
+    const set = db.saveMacroSet({ name: 'Cisco kit' })
+    const other = db.saveMacroSet({ name: 'Proxmox kit' })
+    const saved = db.saveProfile(
+      ProfileSchema.parse({
+        name: 'Assigned switch',
+        host: '192.0.2.7',
+        username: 'admin',
+        macroSetIds: [set.id!, other.id!],
+      })
+    )
+
+    const read = db.getProfile(saved.id!)!
+    assert(read.macroSetIds.length === 2, `expected 2 assigned sets, got ${read.macroSetIds.length}`)
+    assert(read.macroSetIds.includes(set.id!), 'assigned set lost')
+
+    // A deleted set must not linger as a dangling id on the connection.
+    db.deleteMacroSet(other.id!)
+    const resaved = db.saveProfile({ ...read, name: read.name })
+    assert(
+      resaved.macroSetIds.length === 1 && resaved.macroSetIds[0] === set.id,
+      `dangling set id kept: ${JSON.stringify(resaved.macroSetIds)}`
+    )
+    return `${resaved.macroSetIds.length} set kept, 1 dangling id dropped`
+  })
+
+  check('existing connections default to showing every set', () => {
+    const saved = db.saveProfile(
+      ProfileSchema.parse({ name: 'Unassigned box', host: '192.0.2.8', username: 'root' })
+    )
+    const read = db.getProfile(saved.id!)!
+    assert(Array.isArray(read.macroSetIds), 'macroSetIds is not an array')
+    assert(read.macroSetIds.length === 0, 'a new connection should name no sets')
+    return 'empty assignment reads back as []'
+  })
+
+  check('tags round-trip and are normalised on both sides', () => {
+    const set = db.saveMacroSet({
+      name: 'Tagged set',
+      tags: ['  Cisco ', 'CISCO', 'Customer Acme'],
+    } as never)
+
+    // Normalised on write, so the panel filters on the same spelling the
+    // database holds — echoing the caller's input back would not prove this.
+    assert(
+      JSON.stringify(set.tags) === JSON.stringify(['cisco', 'customer-acme']),
+      `set tags not normalised: ${JSON.stringify(set.tags)}`
+    )
+    assert(
+      JSON.stringify(db.getMacroSet(set.id!)!.tags) === JSON.stringify(['cisco', 'customer-acme']),
+      'set tags lost on re-read'
+    )
+
+    const profile = db.saveProfile(
+      ProfileSchema.parse({
+        name: 'tagged host',
+        host: '10.4.4.4',
+        username: 'admin',
+        tags: ['Cisco', 'switch'],
+      })
+    )
+    assert(
+      JSON.stringify(db.getProfile(profile.id!)!.tags) === JSON.stringify(['cisco', 'switch']),
+      'profile tags lost'
+    )
+
+    // A tag naming a set that does not exist must survive — that is the point
+    // of a tag, and pruning it the way macroSetIds is pruned would break it.
+    const future = db.saveProfile(
+      ProfileSchema.parse({
+        name: 'host for a set not installed yet',
+        host: '10.4.4.5',
+        username: 'admin',
+        tags: ['nothing-carries-this'],
+      })
+    )
+    assert(
+      db.getProfile(future.id!)!.tags.includes('nothing-carries-this'),
+      'an unmatched tag was pruned'
+    )
+
+    return 'normalised on write, unmatched tags kept'
+  })
+
+  check('exported button sets carry their tags', () => {
+    const set = db.saveMacroSet({ name: 'Exportable tagged', tags: ['fortinet', 'firewall'] } as never)
+    const bundle = db.exportMacroSets([set.id!])
+    assert(
+      JSON.stringify(bundle.sets[0].tags) === JSON.stringify(['firewall', 'fortinet']),
+      `tags missing from export: ${JSON.stringify(bundle.sets[0].tags)}`
+    )
+
+    // And survive the round trip, so a shared set arrives already matching.
+    const imported = db.importMacroSets(bundle)
+    assert(imported.sets === 1, 'import did not create the set')
+    const copy = db.listMacroSets().find((s) => s.name.includes('Exportable tagged') && s.id !== set.id)
+    assert(copy !== undefined, 'imported copy not found')
+    assert(
+      JSON.stringify(copy!.tags) === JSON.stringify(['firewall', 'fortinet']),
+      `tags lost on import: ${JSON.stringify(copy!.tags)}`
+    )
+    return 'tags survive export and import'
+  })
+
+  check('copying a button snapshots it', () => {
+    const from = db.saveMacroSet({ name: 'Copy source' })
+    const to = db.saveMacroSet({ name: 'Copy target' })
+    const original = db.saveMacro(
+      MacroSchema.parse({
+        setId: from.id!,
+        name: 'Show version',
+        steps: [{ type: 'send', text: 'show version', appendEnter: true }],
+        confirmBeforeRun: true,
+      })
+    )
+
+    const copy = db.copyMacro(original.id!, to.id!)
+    assert(copy.setId === to.id, 'copy landed in the wrong set')
+    assert(copy.id !== original.id, 'copy reused the original id')
+    assert(copy.name === 'Show version', `copy renamed unnecessarily: ${copy.name}`)
+    assert(copy.sourceMacroId === original.id, 'copy did not record its origin')
+    assert(copy.steps[0].text === 'show version', 'steps not copied')
+    assert(copy.confirmBeforeRun, 'guard not copied')
+
+    // Editing the copy must leave the original untouched.
+    db.saveMacro({ ...copy, name: 'Show version (edited)', steps: [] })
+    const untouched = db.getMacro(original.id!)!
+    assert(untouched.name === 'Show version', 'editing the copy renamed the original')
+    assert(untouched.steps.length === 1, 'editing the copy emptied the original')
+    return 'independent copy with provenance'
+  })
+
+  check('copying into the same set avoids a name clash', () => {
+    const set = db.saveMacroSet({ name: 'Clash set' })
+    const original = db.saveMacro(
+      MacroSchema.parse({ setId: set.id!, name: 'Uptime', steps: [] })
+    )
+
+    const first = db.copyMacro(original.id!, set.id!)
+    const second = db.copyMacro(original.id!, set.id!)
+    assert(first.name === 'Uptime (copy)', `unexpected first copy name: ${first.name}`)
+    assert(second.name === 'Uptime (copy 2)', `unexpected second copy name: ${second.name}`)
+    return `${first.name}, ${second.name}`
+  })
+
+  check('starring copies into favourites and un-starring removes it', () => {
+    const set = db.saveMacroSet({ name: 'Starrable' })
+    const macro = db.saveMacro(
+      MacroSchema.parse({
+        setId: set.id!,
+        name: 'Interface status',
+        steps: [{ type: 'send', text: 'show interfaces status', appendEnter: true }],
+      })
+    )
+
+    const on = db.toggleFavourite(macro.id!)
+    assert(on.favourited, 'starring did not report success')
+
+    const favourites = db.getMacroSet(on.setId)
+    assert(favourites !== null, 'favourites set was not created')
+
+    const starred = db.listMacrosInSet(on.setId)
+    assert(starred.length === 1, `expected 1 favourite, got ${starred.length}`)
+    assert(starred[0].sourceMacroId === macro.id, 'favourite lost its origin')
+
+    // Starring twice must toggle, not pile up duplicates.
+    const off = db.toggleFavourite(macro.id!)
+    assert(!off.favourited, 'second star did not un-favourite')
+    assert(db.listMacrosInSet(on.setId).length === 0, 'favourite not removed')
+    return `via set "${favourites!.name}"`
+  })
+
+  check('two buttons with the same name star independently', () => {
+    // "Interface Status" exists in a dozen shipped sets, so the star has to key
+    // on the id rather than the name or one would un-star another.
+    const a = db.saveMacroSet({ name: 'Vendor A' })
+    const b = db.saveMacroSet({ name: 'Vendor B' })
+    const first = db.saveMacro(MacroSchema.parse({ setId: a.id!, name: 'Interface Status', steps: [] }))
+    const second = db.saveMacro(MacroSchema.parse({ setId: b.id!, name: 'Interface Status', steps: [] }))
+
+    db.toggleFavourite(first.id!)
+    db.toggleFavourite(second.id!)
+    const favourites = db.listMacrosInSet(db.ensureFavouritesSet().id!)
+    assert(favourites.length === 2, `expected 2 favourites, got ${favourites.length}`)
+
+    db.toggleFavourite(first.id!)
+    const left = db.listMacrosInSet(db.ensureFavouritesSet().id!)
+    assert(left.length === 1, `un-starring one removed ${2 - left.length}`)
+    assert(left[0].sourceMacroId === second.id, 'un-starred the wrong favourite')
+    return 'name collisions kept apart'
   })
 
   db.close()

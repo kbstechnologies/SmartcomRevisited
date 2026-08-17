@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useStore } from '../store/useStore'
+import TagEditor from './TagEditor'
 import { MacroSetSchema } from '@shared/types'
 import type { MacroSet } from '@shared/types'
 
@@ -11,18 +12,46 @@ interface MacroSetFormProps {
 
 export default function MacroSetForm({ macroSet, onClose, onSave }: MacroSetFormProps) {
   const { saveMacroSet } = useStore()
-  const [formData, setFormData] = useState({
+  const macroSets = useStore((state) => state.macroSets)
+  const profiles = useStore((state) => state.profiles)
+
+  const [formData, setFormData] = useState<{
+    name: string
+    description: string
+    tags: string[]
+  }>({
     name: '',
     description: '',
+    tags: [],
   })
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
+
+  /**
+   * Tags already used by any set *or any connection*.
+   *
+   * Connections are included deliberately: the common case is tagging a host
+   * `cisco` first and then wanting a set to meet it, and a suggestion list that
+   * only knew about other sets would leave that tag un-offered — exactly when
+   * getting the spelling right matters most.
+   */
+  const knownTags = useMemo(
+    () =>
+      [
+        ...new Set([
+          ...macroSets.flatMap((set) => set.tags ?? []),
+          ...profiles.flatMap((profile) => profile.tags ?? []),
+        ]),
+      ].sort(),
+    [macroSets, profiles]
+  )
 
   useEffect(() => {
     if (macroSet) {
       setFormData({
         name: macroSet.name,
         description: macroSet.description || '',
+        tags: macroSet.tags ?? [],
       })
     }
   }, [macroSet])
@@ -37,6 +66,7 @@ export default function MacroSetForm({ macroSet, onClose, onSave }: MacroSetForm
         id: macroSet?.id,
         name: formData.name,
         description: formData.description || undefined,
+        tags: formData.tags,
       }
 
       const validatedMacroSet = MacroSetSchema.parse(macroSetData)
@@ -101,6 +131,21 @@ export default function MacroSetForm({ macroSet, onClose, onSave }: MacroSetForm
               onChange={(e) => setFormData(prev => ({ ...prev, description: e.target.value }))}
               className="form-input resize-none h-24"
               placeholder="Optional description for this macro set"
+            />
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Tags</label>
+            <p className="text-[11px] text-gray-400 mb-2">
+              This set appears on any connection sharing one of these tags — tag a switch{' '}
+              <span className="text-gray-300">cisco</span> and it gets every set tagged{' '}
+              <span className="text-gray-300">cisco</span>, including ones installed later.
+            </p>
+            <TagEditor
+              value={formData.tags}
+              onChange={(tags) => setFormData((prev) => ({ ...prev, tags }))}
+              suggestions={knownTags}
+              placeholder="e.g. cisco, firewall, customer-acme"
             />
           </div>
 

@@ -1,8 +1,14 @@
-import { Client } from 'ssh2'
+import { Client, utils as sshUtils } from 'ssh2'
 import { createHash, generateKeyPair as generateKeyPairCb, type KeyObject } from 'crypto'
 import { promisify } from 'util'
 import { chmodSync, writeFileSync } from 'fs'
 import type { Profile, SshKeyType } from '../src/shared/types'
+import {
+  ed25519PrivateFields,
+  encodeMpint,
+  encodeOpenSshPrivateKey,
+  encodeString,
+} from './openssh-key'
 
 const generateKeyPairAsync = promisify(generateKeyPairCb)
 
@@ -15,35 +21,8 @@ export interface GeneratedKeyPair {
   fingerprint: string
 }
 
-// ---------------------------------------------------------------------------
-// OpenSSH wire encoding
-// ---------------------------------------------------------------------------
-
-const encodeUint32 = (value: number): Buffer => {
-  const buf = Buffer.alloc(4)
-  buf.writeUInt32BE(value, 0)
-  return buf
-}
-
-/** SSH `string`: 4-byte big-endian length followed by the bytes. */
-const encodeString = (data: Buffer | string): Buffer => {
-  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8')
-  return Buffer.concat([encodeUint32(buf.length), buf])
-}
-
-/**
- * SSH `mpint`: two's-complement big-endian. A leading zero byte is prepended
- * when the high bit is set, otherwise the value would read as negative.
- */
-const encodeMpint = (value: Buffer): Buffer => {
-  let start = 0
-  while (start < value.length - 1 && value[start] === 0) start++
-  let bytes = value.subarray(start)
-  if (bytes[0] & 0x80) {
-    bytes = Buffer.concat([Buffer.from([0]), bytes])
-  }
-  return encodeString(bytes)
-}
+// The SSH wire encoders live in openssh-key.ts, which is where the format they
+// serve is documented; duplicating them here once meant two mpint routines.
 
 const fromBase64Url = (value: string): Buffer => Buffer.from(value, 'base64url')
 
@@ -86,85 +65,180 @@ export async function generateKeyPair(options: {
   const { type, bits = 4096, passphrase } = options
   const comment = sanitizeComment(options.comment || '')
 
-  // Node can only emit ed25519 private keys as PKCS#8, which OpenSSH rejects
-  // ("invalid format") — it requires its own openssh-key-v1 container for that
-  // algorithm. Generating one would hand the user an unusable file, so we
-  // generate RSA only. Existing ed25519 keys can still be imported and used.
-  if (type !== 'rsa') {
-    throw new Error(
-      'Smartcom Revisited generates RSA keys only. ed25519 private keys must be created with ' +
-        '`ssh-keygen -t ed25519` and imported, so the file stays OpenSSH-compatible.'
-    )
-  }
+  if (type === 'ed25519') return generateEd25519(comment, passphrase)
 
   if (bits < 2048) {
     throw new Error('RSA keys must be at least 2048 bits')
   }
 
-  // ssh2 parses PKCS#1 ("BEGIN RSA PRIVATE KEY") most reliably for RSA;
-  // ed25519 is only exportable as PKCS#8.
-  const privateKeyEncoding: any =
-    type === 'rsa'
-      ? { type: 'pkcs1', format: 'pem' }
-      : { type: 'pkcs8', format: 'pem' }
-
+  // RSA stays on PKCS#1 ("BEGIN RSA PRIVATE KEY"), which ssh2 and every legacy
+  // device in scope read happily, and whose output was previously verified
+  // byte-identical to ssh-keygen. Only ed25519 needs the OpenSSH container, so
+  // only ed25519 gets it — there is nothing to gain from rewriting a path that
+  // is known good and is the compatibility option by definition.
+  const privateKeyEncoding: Record<string, unknown> = { type: 'pkcs1', format: 'pem' }
   if (passphrase) {
     privateKeyEncoding.cipher = 'aes-256-cbc'
     privateKeyEncoding.passphrase = passphrase
   }
 
-  const { publicKey, privateKey } = (await generateKeyPairAsync(
-    type === 'rsa' ? ('rsa' as any) : ('ed25519' as any),
-    {
-      ...(type === 'rsa' ? { modulusLength: bits } : {}),
-      publicKeyEncoding: { type: 'spki', format: 'der' },
-      privateKeyEncoding,
-    } as any
-  )) as unknown as { publicKey: Buffer; privateKey: string }
+  const { publicKey, privateKey } = (await generateKeyPairAsync('rsa' as never, {
+    modulusLength: bits,
+    publicKeyEncoding: { type: 'spki', format: 'der' },
+    privateKeyEncoding,
+  } as never)) as unknown as { publicKey: Buffer; privateKey: string }
 
   const { createPublicKey } = await import('crypto')
   const publicKeyObject = createPublicKey({ key: publicKey, format: 'der', type: 'spki' })
 
-  const blob = buildPublicKeyBlob(publicKeyObject, type)
-  const openSshPublicKey = [algorithmName(type), blob.toString('base64'), comment]
-    .filter(Boolean)
-    .join(' ')
+  const blob = buildPublicKeyBlob(publicKeyObject, 'rsa')
 
   return {
     privateKeyPem: privateKey,
-    publicKey: openSshPublicKey,
+    publicKey: [algorithmName('rsa'), blob.toString('base64'), comment].filter(Boolean).join(' '),
     fingerprint: fingerprintOf(blob),
   }
 }
 
-/** Derives the OpenSSH public key line from an existing private key PEM. */
+/**
+ * ed25519 generation.
+ *
+ * Node exports these as PKCS#8 only, which OpenSSH rejects outright — that is
+ * why generation used to be RSA-only. The seed and public point are the whole
+ * key, so we take them from the JWK export and write OpenSSH's own container
+ * ourselves (see `openssh-key.ts`). The result is verified against the real
+ * `ssh-keygen -y` binary in `openssh-key.test.ts`, encrypted and not.
+ */
+async function generateEd25519(
+  comment: string,
+  passphrase?: string
+): Promise<GeneratedKeyPair> {
+  const { publicKey, privateKey } = (await generateKeyPairAsync('ed25519' as never, {
+    publicKeyEncoding: { type: 'spki', format: 'der' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'der' },
+  } as never)) as unknown as { publicKey: Buffer; privateKey: Buffer }
+
+  const { createPrivateKey, createPublicKey } = await import('crypto')
+
+  const privateJwk = createPrivateKey({ key: privateKey, format: 'der', type: 'pkcs8' }).export({
+    format: 'jwk',
+  }) as Record<string, string>
+  const publicJwk = createPublicKey({ key: publicKey, format: 'der', type: 'spki' }).export({
+    format: 'jwk',
+  }) as Record<string, string>
+
+  const seed = Buffer.from(privateJwk.d, 'base64url')
+  const point = Buffer.from(publicJwk.x, 'base64url')
+  const blob = Buffer.concat([encodeString('ssh-ed25519'), encodeString(point)])
+
+  return {
+    privateKeyPem: encodeOpenSshPrivateKey({
+      publicBlob: blob,
+      privateFields: ed25519PrivateFields(seed, point),
+      comment,
+      passphrase,
+    }),
+    publicKey: [algorithmName('ed25519'), blob.toString('base64'), comment]
+      .filter(Boolean)
+      .join(' '),
+    fingerprint: fingerprintOf(blob),
+  }
+}
+
+/**
+ * Turns whatever the user pointed at into a public key line, or explains why it
+ * cannot.
+ *
+ * Parsing goes through ssh2 rather than Node's `crypto`. Node cannot read the
+ * `openssh-key-v1` container at all — it answers
+ * `error:1E08010C:DECODER routines::unsupported`, or on other builds the
+ * `NO_START_LINE` reported in issue #1 — so every ed25519 key written by a
+ * modern `ssh-keygen` failed to import while the dialog claimed to accept
+ * "PEM or OpenSSH". ssh2 already ships a parser for both containers and is
+ * already a dependency, and it is the same parser that will later authenticate
+ * with the key, so agreeing with it here is the point.
+ */
 export async function publicKeyFromPrivate(
   privateKeyPem: string,
   passphrase: string | undefined,
   comment: string
 ): Promise<{ publicKey: string; fingerprint: string; type: SshKeyType }> {
-  const { createPrivateKey, createPublicKey } = await import('crypto')
+  const text = privateKeyPem.trim()
+  if (!text) throw new Error('The file is empty')
 
-  const privateKeyObject = createPrivateKey(
-    passphrase ? { key: privateKeyPem, passphrase } : privateKeyPem
-  )
-  const publicKeyObject = createPublicKey(privateKeyObject)
+  const parsed = sshUtils.parseKey(text, passphrase || undefined)
 
-  const asymmetricType = publicKeyObject.asymmetricKeyType
-  if (asymmetricType !== 'rsa' && asymmetricType !== 'ed25519') {
-    throw new Error(`Unsupported key type: ${asymmetricType}`)
+  if (parsed instanceof Error) {
+    throw new Error(describeParseFailure(parsed, text, passphrase))
   }
 
-  const type = asymmetricType as SshKeyType
-  const blob = buildPublicKeyBlob(publicKeyObject, type)
+  // parseKey returns an array for formats that can hold several keys.
+  const key = Array.isArray(parsed) ? parsed[0] : parsed
+  if (!key) throw new Error('No key was found in that file')
+
+  if (!key.isPrivateKey()) {
+    throw new Error(
+      'That file holds a public key, not a private one. Import the file without the ' +
+        '".pub" extension.'
+    )
+  }
+
+  const type = SSH_TYPE_BY_ALGORITHM[key.type]
+  if (!type) {
+    throw new Error(
+      `Unsupported key type "${key.type}". Smartcom Revisited supports ed25519 and RSA.`
+    )
+  }
+
+  const blob = key.getPublicSSH()
 
   return {
     type,
-    publicKey: [algorithmName(type), blob.toString('base64'), sanitizeComment(comment)]
+    publicKey: [key.type, blob.toString('base64'), sanitizeComment(comment)]
       .filter(Boolean)
       .join(' '),
     fingerprint: fingerprintOf(blob),
   }
+}
+
+/** Algorithms this app will manage, keyed by the name ssh2 reports. */
+const SSH_TYPE_BY_ALGORITHM: Record<string, SshKeyType | undefined> = {
+  'ssh-rsa': 'rsa',
+  'ssh-ed25519': 'ed25519',
+}
+
+/**
+ * ssh2's parse errors are accurate but not addressed to a person — "Bad
+ * passphrase?" and "Cannot parse privateKey" do not say what to do next. The
+ * three cases below are the ones a user actually hits, and each is worth
+ * telling apart: the wrong passphrase, a missing one, and a file that was never
+ * a key.
+ */
+function describeParseFailure(error: Error, text: string, passphrase?: string): string {
+  const message = error.message || String(error)
+
+  if (/passphrase/i.test(message) || /decrypt/i.test(message)) {
+    return passphrase
+      ? 'That passphrase does not unlock this key. Check it and try again.'
+      : 'This key is passphrase-protected. Enter its passphrase and try again.'
+  }
+
+  if (/encrypted/i.test(message) && !passphrase) {
+    return 'This key is passphrase-protected. Enter its passphrase and try again.'
+  }
+
+  if (text.includes('PUBLIC KEY') || /^(ssh|ecdsa)-/.test(text)) {
+    return 'That file holds a public key, not a private one.'
+  }
+
+  if (!text.includes('-----BEGIN')) {
+    return (
+      'That does not look like a private key file. Expected a file beginning with ' +
+      '"-----BEGIN OPENSSH PRIVATE KEY-----" or "-----BEGIN RSA PRIVATE KEY-----".'
+    )
+  }
+
+  return `Could not read that private key: ${message}`
 }
 
 /** Writes a private key to disk with owner-only permissions. */

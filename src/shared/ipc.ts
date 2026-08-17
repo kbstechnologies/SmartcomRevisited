@@ -23,6 +23,16 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
     data: z.object({ profileIds: z.array(z.string()).optional() }).default({}),
   }),
   z.object({ channel: z.literal('profiles:import'), data: z.any().optional() }),
+  z.object({
+    channel: z.literal('profiles:export-securecrt'),
+    data: z
+      .object({
+        profileIds: z.array(z.string()).optional(),
+        /** Off by default: an account name leaving the machine is a choice. */
+        includeUsernames: z.boolean().default(false),
+      })
+      .default({ includeUsernames: false }),
+  }),
 
   // Connection groups
   z.object({ channel: z.literal('groups:list'), data: z.any().optional() }),
@@ -91,6 +101,16 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
   z.object({ channel: z.literal('macros:get'), data: z.object({ id: z.string() }) }),
   z.object({ channel: z.literal('macros:save'), data: MacroSchema }),
   z.object({ channel: z.literal('macros:delete'), data: z.object({ id: z.string() }) }),
+  z.object({
+    channel: z.literal('macros:copy'),
+    data: z.object({
+      id: z.string(),
+      targetSetId: z.string(),
+      /** Blank or absent lets the database pick a name free in the target set. */
+      name: z.string().optional(),
+    }),
+  }),
+  z.object({ channel: z.literal('macros:toggle-favourite'), data: z.object({ id: z.string() }) }),
   z.object({ channel: z.literal('macros:run'), data: MacroRunParamsSchema }),
   z.object({ channel: z.literal('macros:cancel'), data: z.object({ sessionId: z.string() }) }),
   z.object({ channel: z.literal('macros:resume'), data: z.object({ sessionId: z.string() }) }),
@@ -171,7 +191,10 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
     channel: z.literal('keys:generate'),
     data: z.object({
       name: z.string().min(1),
-      type: z.enum(['rsa', 'ed25519']).default('rsa'),
+      // ed25519 by default: it is what ssh-keygen has defaulted to for years,
+      // and RSA is now the deliberate choice for older kit.
+      type: z.enum(['rsa', 'ed25519']).default('ed25519'),
+      /** RSA modulus size, ignored for ed25519 — the curve fixes its length. */
       bits: z.number().min(2048).max(8192).default(4096),
       comment: z.string().default(''),
       /** Encrypts the private key at rest, on top of the OS-backed vault. */

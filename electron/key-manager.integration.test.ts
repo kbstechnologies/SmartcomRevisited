@@ -178,6 +178,79 @@ describe('against a live SSH server', () => {
     expect(Number(lineCount)).toBe(1)
   }, 120000)
 
+  it('generates an ed25519 key, installs it, and then authenticates with it', async (ctx) => {
+    requireServer(ctx)
+    const generated = await generateKeyPair({
+      type: 'ed25519',
+      comment: 'smartcom-ed25519',
+    })
+
+    expect(generated.publicKey.startsWith('ssh-ed25519 ')).toBe(true)
+    // The container format is the whole point — PKCS#8 is what sshd's client
+    // side could not read, and it is what Node would have produced.
+    expect(generated.privateKeyPem).toContain('BEGIN OPENSSH PRIVATE KEY')
+
+    await execWith({ password: PASSWORD }, 'rm -f ~/.ssh/authorized_keys')
+
+    const installed = await installPublicKeyViaPassword(profile, PASSWORD, generated.publicKey)
+    expect(installed.success).toBe(true)
+    expect(installed.status).toBe('installed')
+
+    // A real OpenSSH server accepting our generated key is the claim that
+    // matters; everything before this is a self-consistency check.
+    const whoami = await execWith({ privateKey: generated.privateKeyPem }, 'whoami')
+    expect(whoami).toBe(USER)
+
+    // And sshd agrees it is the algorithm we said it was.
+    const installedLine = await execWith(
+      { privateKey: generated.privateKeyPem },
+      'cat ~/.ssh/authorized_keys'
+    )
+    expect(installedLine.startsWith('ssh-ed25519 ')).toBe(true)
+  }, 120000)
+
+  it('authenticates with a passphrase-protected ed25519 key', async (ctx) => {
+    requireServer(ctx)
+    const passphrase = 'a passphrase with spaces'
+    const generated = await generateKeyPair({
+      type: 'ed25519',
+      comment: 'smartcom-ed25519-enc',
+      passphrase,
+    })
+
+    // The public half derived from the encrypted file must match what we
+    // published when the key was made.
+    const derived = await publicKeyFromPrivate(
+      generated.privateKeyPem,
+      passphrase,
+      'smartcom-ed25519-enc'
+    )
+    expect(derived.type).toBe('ed25519')
+    expect(derived.fingerprint).toBe(generated.fingerprint)
+
+    await execWith({ password: PASSWORD }, 'rm -f ~/.ssh/authorized_keys')
+    const installed = await installPublicKeyViaPassword(profile, PASSWORD, generated.publicKey)
+    expect(installed.success).toBe(true)
+
+    const whoami = await execWith(
+      { privateKey: generated.privateKeyPem, passphrase },
+      'whoami'
+    )
+    expect(whoami).toBe(USER)
+  }, 120000)
+
+  it('rejects an ed25519 key whose passphrase is withheld', async (ctx) => {
+    requireServer(ctx)
+    const generated = await generateKeyPair({ type: 'ed25519', passphrase: 'needed' })
+
+    await execWith({ password: PASSWORD }, 'rm -f ~/.ssh/authorized_keys')
+    await installPublicKeyViaPassword(profile, PASSWORD, generated.publicKey)
+
+    // Without the passphrase ssh2 cannot use the key, and the failure must be
+    // an error rather than a silent fallback to some other auth method.
+    await expect(execWith({ privateKey: generated.privateKeyPem }, 'whoami')).rejects.toThrow()
+  }, 120000)
+
   it('round-trips a passphrase-protected key', async (ctx) => {
     requireServer(ctx)
     const passphrase = 'correct horse battery staple'

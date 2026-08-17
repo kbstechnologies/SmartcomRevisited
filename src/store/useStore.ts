@@ -179,6 +179,17 @@ interface AppStore {
   deleteProfile: (id: string) => Promise<boolean>
   testProfile: (id: string) => Promise<{ success: boolean; error?: string }>
   exportConnections: (profileIds?: string[]) => Promise<{ filePath: string; profiles: number; groups: number }>
+  /** Saved connections as a SecureCRT-importable CSV. Never carries secrets. */
+  exportConnectionsForSecureCrt: (input: {
+    profileIds?: string[]
+    includeUsernames: boolean
+  }) => Promise<{
+    filePath: string
+    readmePath: string
+    exported: number
+    skipped: Array<{ name: string; reason: string }>
+    unsupported: Array<{ name: string; reason: string }>
+  }>
   importConnections: () => Promise<{ groups: number; profiles: number; renamed: Array<{ from: string; to: string }> }>
 
   loadConnectionGroups: () => Promise<void>
@@ -215,6 +226,10 @@ interface AppStore {
   loadMacroSets: () => Promise<void>
   saveMacro: (macro: Macro) => Promise<Macro>
   deleteMacro: (id: string) => Promise<boolean>
+  /** Duplicates a button into another set. Returns the new copy. */
+  copyMacro: (id: string, targetSetId: string, name?: string) => Promise<Macro>
+  /** Stars or un-stars a button. Resolves to true when it is now a favourite. */
+  toggleFavourite: (id: string) => Promise<boolean>
   saveMacroSet: (macroSet: MacroSet) => Promise<MacroSet>
   deleteMacroSet: (id: string) => Promise<boolean>
   exportMacroSets: (setIds: string[]) => Promise<{
@@ -237,7 +252,8 @@ interface AppStore {
   generateSshKey: (input: {
     name: string
     type: 'rsa' | 'ed25519'
-    bits: number
+    /** RSA modulus size. Omitted for ed25519, whose size is fixed by the curve. */
+    bits?: number
     comment: string
     passphrase?: string
   }) => Promise<SshKey>
@@ -503,6 +519,8 @@ const useStore = create<AppStore>((set, get) => ({
   exportConnections: async (profileIds) =>
     invoke('profiles:export', { profileIds }),
 
+  exportConnectionsForSecureCrt: async (input) => invoke('profiles:export-securecrt', input),
+
   importConnections: async () => {
     const result = await invoke<{ groups: number; profiles: number; renamed: Array<{ from: string; to: string }> }>('profiles:import')
     await get().loadProfiles()
@@ -666,6 +684,23 @@ const useStore = create<AppStore>((set, get) => ({
     const deleted = await invoke<boolean>('macros:delete', { id })
     await get().loadMacros()
     return deleted
+  },
+
+  copyMacro: async (id, targetSetId, name) => {
+    const copy = await invoke<Macro>('macros:copy', { id, targetSetId, name })
+    await get().loadMacros()
+    return copy
+  },
+
+  toggleFavourite: async (id) => {
+    const result = await invoke<{ favourited: boolean; setId: string }>('macros:toggle-favourite', {
+      id,
+    })
+    // Starring the first button creates the favourites set, so the set list has
+    // to be reloaded too or the copy lands somewhere the panel cannot render.
+    await get().loadMacroSets()
+    await get().loadMacros()
+    return result.favourited
   },
 
   saveMacroSet: async (macroSet) => {
