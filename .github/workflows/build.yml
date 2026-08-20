@@ -26,20 +26,37 @@ jobs:
       matrix:
         include:
           - os: windows-latest
+            slug: windows
             name: Windows (nsis + portable)
             command: npm run package:win
             artifacts: |
               release/*.exe
               release/*.blockmap
               release/latest.yml
+          # macOS is split by architecture, one native runner each. Building both
+          # on a single host means electron-builder rebuilding better-sqlite3 and
+          # @serialport/bindings-cpp for the *other* architecture, which is the
+          # same cross-arch native rebuild that already forced Windows to x64
+          # only. macos-latest is Apple Silicon now, so the x64 half needs an
+          # Intel runner rather than cross-compilation.
           - os: macos-latest
-            name: macOS (dmg + zip, x64 + arm64)
-            command: npm run package:mac
+            slug: macos-arm64
+            name: macOS arm64 (dmg + zip)
+            command: npm run build && npx electron-builder --mac --arm64 -p never
+            artifacts: |
+              release/*.dmg
+              release/*.zip
+              release/latest-mac.yml
+          - os: macos-13
+            slug: macos-x64
+            name: macOS x64 (dmg + zip)
+            command: npm run build && npx electron-builder --mac --x64 -p never
             artifacts: |
               release/*.dmg
               release/*.zip
               release/latest-mac.yml
           - os: ubuntu-latest
+            slug: linux
             name: Linux (AppImage + deb + rpm)
             command: npm run package:linux
             artifacts: |
@@ -92,7 +109,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: smartcom-revisited-${{ runner.os }}
+          name: smartcom-revisited-${{ matrix.slug }}
           path: ${{ matrix.artifacts }}
           if-no-files-found: error
 
