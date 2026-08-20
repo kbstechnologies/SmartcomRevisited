@@ -21,6 +21,7 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -47,7 +48,10 @@ jobs:
               release/*.dmg
               release/*.zip
               release/latest-mac.yml
-          - os: macos-13
+          # macos-13 is retired — the label no longer maps to any runner, so a
+          # job asking for it sits queued forever rather than failing. macos-15-intel
+          # is the current Intel image.
+          - os: macos-15-intel
             slug: macos-x64
             name: macOS x64 (dmg + zip)
             command: npm run build && npx electron-builder --mac --x64 -p never
