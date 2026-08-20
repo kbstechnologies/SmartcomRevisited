@@ -143,3 +143,4 @@ Thumbs.db
 # repository root rather than in release/, because `npm run clean` deletes
 # release/ wholesale and took the 1.3.0 brief with it once.
 /WEBSITE-UPDATE-*.md
+/RELEASE-NOTES-*.md

@@ -28,8 +28,18 @@
  */
 
 const { execFileSync } = require('child_process')
-const { closeSync, openSync, writeSync, readSync, statSync } = require('fs')
-const { basename } = require('path')
+const {
+  closeSync,
+  openSync,
+  writeSync,
+  readSync,
+  statSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+} = require('fs')
+const { basename, dirname, join } = require('path')
+const { createHash } = require('crypto')
 
 const OWNER = process.env.APPIMAGE_GH_OWNER || 'kbstechnologies'
 const REPO = process.env.APPIMAGE_GH_REPO || 'SmartcomRevisited'
@@ -96,6 +106,69 @@ function writeUpdateInformation(file) {
   return info
 }
 
+/**
+ * Re-hashes the AppImage in electron-builder's own feed.
+ *
+ * electron-builder computes latest-linux.yml's sha512 when it writes the
+ * AppImage, and writeUpdateInformation() then rewrites bytes *inside* that same
+ * file. The section is fixed-size, so the length never changes and nothing
+ * looks wrong — but the recorded hash now describes a file that no longer
+ * exists, and electron-updater rejects the download it has just made. That is
+ * how 1.5.0 shipped, and it would have been every Linux release from 1.4.0 on.
+ *
+ * Only this AppImage's entry is touched; the deb and rpm were never modified.
+ */
+function refreshFeed(file, feedPath) {
+  const feed = feedPath || join(dirname(file), 'latest-linux.yml')
+  if (!existsSync(feed)) {
+    console.warn(`no ${basename(feed)} beside the AppImage — skipping hash refresh`)
+    return null
+  }
+
+  const name = basename(file)
+  const sha512 = createHash('sha512').update(readFileSync(file)).digest('base64')
+  const size = statSync(file).size
+  const lines = readFileSync(feed, 'utf8').split(/\r?\n/)
+  let replaced = 0
+
+  // Matched line by line rather than with a regex built from the filename:
+  // version numbers and dots in that name are regex metacharacters, and an
+  // escaping mistake there would silently match nothing and report success.
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim() !== `- url: ${name}`) continue
+    for (let j = i + 1; j < lines.length; j++) {
+      // Stop at the next list item. Its lines are indented too, so testing only
+      // for indentation walks straight on into the deb and the rpm and rewrites
+      // their hashes with this one — which is what the first version did.
+      if (!/^\s/.test(lines[j]) || /^\s*- /.test(lines[j])) break
+      if (/^\s+sha512:/.test(lines[j])) {
+        lines[j] = lines[j].replace(/sha512:.*$/, `sha512: ${sha512}`)
+        replaced++
+      } else if (/^\s+size:/.test(lines[j])) {
+        lines[j] = lines[j].replace(/size:.*$/, `size: ${size}`)
+      }
+    }
+  }
+
+  // electron-updater also reads the legacy top-level path/sha512 pair, which
+  // names whichever artifact is primary — usually this AppImage.
+  const pathLine = lines.findIndex((l) => l.startsWith('path: '))
+  if (pathLine !== -1 && lines[pathLine].slice('path: '.length).trim() === name) {
+    const top = lines.findIndex((l) => /^sha512: /.test(l))
+    if (top !== -1) {
+      lines[top] = `sha512: ${sha512}`
+      replaced++
+    }
+  }
+
+  if (!replaced) {
+    throw new Error(`${basename(feed)} has no entry for ${name}`)
+  }
+
+  writeFileSync(feed, lines.join('\n'))
+  return { feed, sha512, size, replaced }
+}
+
 function makeZsync(file) {
   // -u is the URL a client fetches to get the file itself. AppImageUpdate
   // resolves a bare filename against the release the .zsync came from, which is
@@ -107,7 +180,12 @@ function makeZsync(file) {
 }
 
 function main() {
-  const file = process.argv[2]
+  const args = process.argv.slice(2)
+  // --feed-only repairs an artifact set that is already built: it re-hashes the
+  // feed without touching the AppImage or calling zsyncmake, so it runs on any
+  // platform. A full run needs readelf and zsync, which means Linux.
+  const feedOnly = args.includes('--feed-only')
+  const file = args.filter((a) => !a.startsWith('--'))[0]
   if (!file) {
     console.error('usage: node tools/appimage-update-info.js <path to .AppImage>')
     process.exit(2)
@@ -115,11 +193,20 @@ function main() {
 
   statSync(file)
 
-  const info = writeUpdateInformation(file)
-  console.log(`update information: ${info}`)
+  if (!feedOnly) {
+    const info = writeUpdateInformation(file)
+    console.log(`update information: ${info}`)
 
-  const zsync = makeZsync(file)
-  console.log(`wrote ${basename(zsync)} (${statSync(zsync).size} bytes)`)
+    const zsync = makeZsync(file)
+    console.log(`wrote ${basename(zsync)} (${statSync(zsync).size} bytes)`)
+  }
+
+  // Always last, and never skipped: the recorded hash has to describe the file
+  // as it is after patching, not as electron-builder first wrote it.
+  const refreshed = refreshFeed(file)
+  if (refreshed) {
+    console.log(`refreshed ${basename(refreshed.feed)}: size ${refreshed.size}`)
+  }
 
   console.log(
     '\nPublish BOTH files on the GitHub release, with the AppImage keeping the\n' +
@@ -129,4 +216,8 @@ function main() {
   )
 }
 
-main()
+module.exports = { refreshFeed }
+
+if (require.main === module) {
+  main()
+}

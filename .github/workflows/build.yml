@@ -111,6 +111,32 @@ jobs:
           readelf -p .upd_info "$appimage" | grep -q 'gh-releases-zsync' \
             || { echo "update information missing from $appimage"; exit 1; }
 
+      # Patching the AppImage in place leaves its length unchanged, so a stale
+      # sha512 in latest-linux.yml looks entirely plausible — 1.5.0 published one
+      # and electron-updater rejected the download it had just made. The tool
+      # re-hashes the feed now; this proves it, for every artifact in it.
+      - name: Verify the Linux feed matches the artifacts
+        if: runner.os == 'Linux'
+        run: |
+          node -e '
+            const fs = require("fs"), crypto = require("crypto")
+            const text = fs.readFileSync("release/latest-linux.yml", "utf8")
+            const entry = /- url: (.+)\n\s+sha512: (.+)\n\s+size: (\d+)/g
+            let m, bad = 0, seen = 0
+            while ((m = entry.exec(text))) {
+              const bytes = fs.readFileSync("release/" + m[1].trim())
+              const sha = crypto.createHash("sha512").update(bytes).digest("base64")
+              seen++
+              if (sha !== m[2].trim() || bytes.length !== Number(m[3])) {
+                console.error("stale entry for " + m[1].trim())
+                bad++
+              }
+            }
+            if (!seen) { console.error("no entries found in latest-linux.yml"); process.exit(1) }
+            console.log(seen + " entries verified against the built artifacts")
+            process.exit(bad ? 1 : 0)
+          '
+
       - uses: actions/upload-artifact@v7
         with:
           name: smartcom-revisited-${{ matrix.slug }}
