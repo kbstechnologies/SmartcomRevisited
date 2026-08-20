@@ -10,6 +10,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Creating the release needs write access to repository contents. The default
+# GITHUB_TOKEN is read-only, which is why every 1.5.0 job built perfectly and
+# then failed on "Attach to release" — the builds were never the problem.
+# Scoped to the minimum: nothing here needs packages, issues or deployments.
+permissions:
+  contents: write
+
 jobs:
   build:
     name: ${{ matrix.name }}
