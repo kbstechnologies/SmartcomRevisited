@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import SecureCrtPanel from './SecureCrtPanel'
 import { useStore } from '../store/useStore'
 import { SettingsSchema } from '@shared/types'
 import type { Settings } from '@shared/types'
@@ -59,6 +60,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     { id: 'terminal', label: 'Terminal', icon: '💻' },
     { id: 'logging', label: 'Logging', icon: '📝' },
     { id: 'security', label: 'Security', icon: '🔒' },
+    { id: 'advanced', label: 'Advanced', icon: '🧰' },
   ]
 
   if (!isOpen) return null
@@ -286,6 +288,8 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                     </div>
                   </div>
                 )}
+
+                {activeTab === 'advanced' && <SecureCrtPanel />}
 
                 {activeTab === 'security' && (
                   <div className="space-y-6">

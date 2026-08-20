@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { clsx } from 'clsx'
 import {
   XMarkIcon,
+  PlayIcon,
   PlusIcon,
   Squares2X2Icon,
   WindowIcon,
@@ -103,6 +104,11 @@ export default function SessionWorkspace() {
     [sessions.length, gridColumns]
   )
 
+  const runningMacros = useStore((state) => state.runningMacros)
+  /** The macro running on a session, if any — drives the tab indicator. */
+  const busyOn = (sessionId: string) =>
+    runningMacros.find((item) => item.sessionId === sessionId)
+
   /** Focus is owned by the main process so every window agrees on the target. */
   const focusSession = (sessionId: string) => {
     setLastFocusedHere(sessionId)
@@ -110,9 +116,26 @@ export default function SessionWorkspace() {
     void window.electronAPI.invoke('windows:set-active-session', { sessionId })
   }
 
+  /**
+   * Closing kills the shell a macro is writing into, so the run dies with it.
+   * The main process refuses and says what is in flight; the question is asked
+   * here, where it can name the button and be honest that stopping the script
+   * does not stop whatever it already started on the far end.
+   */
   const handleClose = async (sessionId: string, event: React.MouseEvent) => {
     event.stopPropagation()
-    await closeSession(sessionId)
+
+    const result = await closeSession(sessionId)
+    if (!result.blockedBy) return
+
+    const { macroName, profileName } = result.blockedBy
+    const proceed = window.confirm(
+      `"${macroName}" is still running on ${profileName}.\n\n` +
+        'Closing this session stops the remaining steps. Anything already started on ' +
+        'the host keeps running there, but the steps that were going to wait for it, ' +
+        'collect files or clean up will not happen.\n\nClose anyway?'
+    )
+    if (proceed) await closeSession(sessionId, true)
   }
 
   const handleToggleLog = async (sessionId: string, event: React.MouseEvent) => {
@@ -204,6 +227,17 @@ export default function SessionWorkspace() {
             >
               <div className={clsx('w-2 h-2 rounded-full shrink-0', statusColor(session.status))} />
               <span className="truncate">{session.profileName}</span>
+              {/*
+                On the tab rather than only in the button panel: the whole point
+                of a long-running button is that you walk away to another host,
+                and the panel you left is no longer the one on screen.
+              */}
+              {busyOn(session.id) && (
+                <PlayIcon
+                  className="w-3.5 h-3.5 text-blue-400 shrink-0 animate-pulse"
+                  title={`${busyOn(session.id)?.macroName} is running`}
+                />
+              )}
               {sessionLogs[session.id] && (
                 <DocumentTextIcon className="w-3.5 h-3.5 text-green-400 shrink-0" title="Logging" />
               )}
@@ -282,6 +316,12 @@ export default function SessionWorkspace() {
                     >
                       <div className={clsx('w-2 h-2 rounded-full', statusColor(session.status))} />
                       <span className="truncate flex-1">{session.profileName}</span>
+                      {busyOn(session.id) && (
+                        <PlayIcon
+                          className="w-3.5 h-3.5 text-blue-400 shrink-0 animate-pulse"
+                          title={`${busyOn(session.id)?.macroName} is running`}
+                        />
+                      )}
                       <button
                         onClick={(event) => handleToggleLog(session.id, event)}
                         title={sessionLogs[session.id] ? 'Stop logging' : 'Start logging'}

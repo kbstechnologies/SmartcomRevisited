@@ -8,6 +8,14 @@ import type { Macro, MacroStep, Profile, Session } from '../src/shared/types'
 import { VAULT_SERVICE } from '../src/shared/constants'
 import { preparePaste, trackBracketedPaste } from '../src/shared/paste'
 import { interpolate, resolveFields } from '../src/shared/types'
+import { builtinVariables } from '../src/shared/builtin-vars'
+import {
+  ensureParentDir,
+  formatBytes,
+  localNameForRemote,
+  resolveInTransferDir,
+  uniqueLocalPath,
+} from './file-transfer'
 
 // Simple UUID v4 generator
 const uuidv4 = (): string => {
@@ -33,6 +41,43 @@ const MAX_SCROLLBACK_CHARS = 200_000
 
 /** Nesting limit for macros that call other macros or sets. */
 const MAX_CALL_DEPTH = 16
+
+/**
+ * Ceiling on any loop, applied regardless of what the step asks for.
+ *
+ * A button can arrive from the exchange, written by a stranger, and run against
+ * production kit. A loop that cannot terminate would hold the shell open
+ * issuing commands nobody is watching, so the engine keeps the final say.
+ */
+const MAX_LOOP_ITERATIONS = 1000
+const DEFAULT_LOOP_LIMIT = 50
+
+/** Named capture groups from a match, as plain variables. */
+function captureGroups(match: RegExpMatchArray | undefined): Record<string, string> {
+  const groups = match?.groups
+  if (!groups) return {}
+
+  const out: Record<string, string> = {}
+  for (const [name, value] of Object.entries(groups)) {
+    // An optional group that did not participate is undefined; binding it as
+    // "undefined" would put that word into a command.
+    if (typeof value === 'string') out[name] = value
+  }
+  return out
+}
+
+/** Splits a variable into the items a `forEach` walks. */
+function splitList(raw: string, separator: 'lines' | 'comma' | 'whitespace'): string[] {
+  const pattern =
+    separator === 'comma' ? /\s*,\s*/ : separator === 'whitespace' ? /\s+/ : /\r?\n/
+
+  return raw
+    .split(pattern)
+    .map((item) => item.trim())
+    // Blank entries come free with trailing newlines and double separators, and
+    // every one would run the body against an empty value.
+    .filter(Boolean)
+}
 
 /**
  * Escape-sequence scrubbing for `plain` session logs. Built via `new RegExp`
@@ -183,6 +228,16 @@ export interface MacroRunResult {
   commands: string[]
 }
 
+/** A macro in flight on one session. */
+export interface RunningMacro {
+  sessionId: string
+  macroId: string
+  macroName: string
+  /** Host label, so a warning can name the box rather than a session id. */
+  profileName: string
+  startedAt: Date
+}
+
 /** Frame of the macro call stack, used for cycle detection and progress. */
 interface CallFrame {
   macroId: string
@@ -201,6 +256,22 @@ export class SSHManager extends EventEmitter {
   private sessions = new Map<string, SSHSession>()
   private keepaliveIntervals = new Map<string, NodeJS.Timeout>()
   private cancelledRuns = new Set<string>()
+  /**
+   * The macro currently running on each session, keyed by session id.
+   *
+   * This is the only record that a session is busy, and three things depend on
+   * it: refusing a second run on the same shell, warning before a session is
+   * closed, and warning before the app quits.
+   *
+   * Two runs on one session were previously impossible only because the button
+   * panel disabled every button while any macro ran. That flag was global, so
+   * it also stopped work on *other* hosts — removing it is what makes a
+   * long-running button usable, and what makes this lock necessary rather than
+   * theoretical. Without it the two runs interleave writes into one shell, and
+   * the second run's `cancelledRuns.delete` silently discards a cancellation
+   * meant for the first.
+   */
+  private runningMacros = new Map<string, RunningMacro>()
   /** Resolver for the `pause` step currently blocking each session's run. */
   private pendingResumes = new Map<string, () => void>()
   /** In-flight inline `form` steps, keyed by request id. */
@@ -217,6 +288,8 @@ export class SSHManager extends EventEmitter {
   private scriptProvider: ScriptProvider | null = null
   private privateKeyProvider: PrivateKeyProvider | null = null
   private globalVariableProvider: GlobalVariableProvider | null = null
+  /** Root that upload and download steps are confined to. */
+  private transferDirProvider: (() => string) | null = null
   private logDirectory: string
   private defaultLogFormat: SessionLogFormat = 'plain'
 
@@ -233,6 +306,15 @@ export class SSHManager extends EventEmitter {
     this.scriptProvider = provider
   }
 
+  /**
+   * Where transfers may read and write. Injected rather than read here so the
+   * engine never touches the settings store, and so a change to the setting is
+   * live on the next button press rather than at the next restart.
+   */
+  setTransferDirProvider(provider: () => string) {
+    this.transferDirProvider = provider
+  }
+
   /** Variables every macro run inherits, from the user's globals file. */
   setGlobalVariableProvider(provider: GlobalVariableProvider) {
     this.globalVariableProvider = provider
@@ -246,6 +328,143 @@ export class SSHManager extends EventEmitter {
     } catch (error) {
       console.error('Could not read global variables:', error)
       return {}
+    }
+  }
+
+  /**
+   * Opens an SFTP channel, or explains why the device cannot.
+   *
+   * A great many network devices answer SSH perfectly and run no SFTP
+   * subsystem at all — switches, firewalls, PDUs. ssh2 reports that as a bare
+   * "Channel open failure", which reads like a bug in this app rather than a
+   * property of the far end, so it is translated here. This is the single most
+   * likely reason a transfer button fails, and it fails on the device the
+   * operator least expects.
+   */
+  private openSftp(session: SSHSession): Promise<any> {
+    if (session.profile.transport === 'serial') {
+      throw new Error('File transfer needs SSH. This connection is a serial port.')
+    }
+
+    return new Promise((resolve, reject) => {
+      session.client.sftp((err, sftp) => {
+        if (err) {
+          reject(
+            new Error(
+              `${session.profile.name} did not open an SFTP channel: ${err.message}. ` +
+                'Many switches and firewalls answer SSH but run no SFTP subsystem — ' +
+                'check whether this device supports it.'
+            )
+          )
+          return
+        }
+        resolve(sftp)
+      })
+    })
+  }
+
+  /**
+   * Fetches a file from the host.
+   *
+   * `fastGet` rather than a stream so ssh2 pipelines the reads — a capture file
+   * is routinely hundreds of megabytes, and a naive read is slow enough over a
+   * long link that it looks hung.
+   */
+  async downloadFile(
+    sessionId: string,
+    remotePath: string,
+    localPath: string,
+    onProgress?: (transferred: number, total: number) => void
+  ): Promise<{ bytes: number }> {
+    const session = this.sessions.get(sessionId)
+    if (!session) throw new Error('Session not found')
+
+    const sftp = await this.openSftp(session)
+
+    try {
+      // Stat first: it turns "no such file" into a clear message before any
+      // local file is created, and gives the progress bar a denominator.
+      const stats: any = await new Promise((resolve, reject) => {
+        sftp.stat(remotePath, (err: Error | undefined, result: any) =>
+          err ? reject(new Error(`${remotePath} is not readable on the host: ${err.message}`)) : resolve(result)
+        )
+      })
+
+      if (stats.isDirectory?.()) {
+        throw new Error(`${remotePath} is a directory. Transfer steps move one file at a time.`)
+      }
+
+      const total: number = stats.size ?? 0
+
+      await new Promise<void>((resolve, reject) => {
+        sftp.fastGet(
+          remotePath,
+          localPath,
+          {
+            step: (transferred: number) => {
+              // Cancelling has to reach a transfer that may run for minutes;
+              // the step callback is the only place the engine gets a look in.
+              if (this.cancelledRuns.has(sessionId)) {
+                reject(new Error('Macro cancelled'))
+                return
+              }
+              onProgress?.(transferred, total)
+            },
+          },
+          (err: Error | undefined) => (err ? reject(err) : resolve())
+        )
+      })
+
+      return { bytes: total }
+    } finally {
+      sftp.end()
+    }
+  }
+
+  /** Sends a local file to the host. */
+  async uploadFile(
+    sessionId: string,
+    localPath: string,
+    remotePath: string,
+    onProgress?: (transferred: number, total: number) => void
+  ): Promise<{ bytes: number }> {
+    const session = this.sessions.get(sessionId)
+    if (!session) throw new Error('Session not found')
+
+    const { statSync } = await import('fs')
+    const total = statSync(localPath).size
+
+    const sftp = await this.openSftp(session)
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        sftp.fastPut(
+          localPath,
+          remotePath,
+          {
+            step: (transferred: number) => {
+              if (this.cancelledRuns.has(sessionId)) {
+                reject(new Error('Macro cancelled'))
+                return
+              }
+              onProgress?.(transferred, total)
+            },
+          },
+          (err: Error | undefined) =>
+            err
+              ? reject(
+                  new Error(
+                    `Could not write ${remotePath}: ${err.message}. ` +
+                      'Check the directory exists and the account can write to it.'
+                  )
+                )
+              : resolve()
+        )
+      })
+
+      return { bytes: total }
+    } finally {
+      sftp.end()
     }
   }
 
@@ -638,6 +857,12 @@ export class SSHManager extends EventEmitter {
     }
     this.stopLogging(sessionId)
     this.cancelledRuns.delete(sessionId)
+    // A run whose session has gone cannot continue, so the lock must go with
+    // it — otherwise a dropped connection leaves the id marked busy forever and
+    // the warnings would keep naming a host that is no longer open.
+    if (this.runningMacros.delete(sessionId)) {
+      this.emit('macro-running-changed', this.listRunningMacros())
+    }
     this.sessions.delete(sessionId)
   }
 
@@ -948,14 +1173,47 @@ export class SSHManager extends EventEmitter {
       return { success: false, error: 'Session not connected', commands: [] }
     }
 
+    // One macro per shell. Refusing is the only safe answer: the two runs would
+    // interleave their writes, and there is no way to tell afterwards which
+    // command belonged to which. Queueing would be worse — the operator pressed
+    // the button expecting it to run now, not in an hour.
+    const inFlight = this.runningMacros.get(sessionId)
+    if (inFlight) {
+      return {
+        success: false,
+        error: `"${inFlight.macroName}" is already running on ${inFlight.profileName}. Wait for it to finish, or stop it first.`,
+        commands: [],
+      }
+    }
+
+    this.runningMacros.set(sessionId, {
+      sessionId,
+      macroId: macro.id ?? '',
+      macroName: macro.name,
+      profileName: session.profile.name,
+      startedAt: new Date(),
+    })
+    this.emit('macro-running-changed', this.listRunningMacros())
+
     this.cancelledRuns.delete(sessionId)
     const commands: string[] = []
 
-    // Globals sit underneath everything: they are the environment a run happens
-    // in, so anything the button defines or the operator typed overrides them.
-    // Called macros inherit them for free, since the callee scope starts from
-    // the caller's.
-    const scope: Record<string, string> = { ...this.globalVariables() }
+    // Precedence, lowest first: built-ins, globals, field defaults, then what
+    // the operator actually typed.
+    //
+    // Built-ins are bottom so a global or a field named EPOCH still wins —
+    // adding a name to this list must never change what an existing button
+    // does. They are computed once here rather than per step, so a filename
+    // built in one step and collected in another names the same file; see
+    // builtin-vars.ts.
+    const scope: Record<string, string> = {
+      ...builtinVariables({
+        host: session.profile.host,
+        username: session.profile.username,
+        profileName: session.profile.name,
+      }),
+      ...this.globalVariables(),
+    }
 
     // Field defaults fill any variable the caller did not supply.
     for (const field of resolveFields(macro)) {
@@ -979,7 +1237,22 @@ export class SSHManager extends EventEmitter {
     } finally {
       this.pendingResumes.delete(sessionId)
       this.rejectPendingForms(sessionId)
+      // Released here rather than at each return: an exception, a cancel and a
+      // clean finish must all free the shell, or the host stays busy forever
+      // and nothing can run on it again without a reconnect.
+      this.runningMacros.delete(sessionId)
+      this.emit('macro-running-changed', this.listRunningMacros())
     }
+  }
+
+  /** Macros in flight, for the busy indicators and the close/quit warnings. */
+  listRunningMacros(): RunningMacro[] {
+    return [...this.runningMacros.values()]
+  }
+
+  /** True when a macro is running on this session. */
+  isSessionBusy(sessionId: string): boolean {
+    return this.runningMacros.has(sessionId)
   }
 
   private async runMacroFrames(
@@ -1054,7 +1327,13 @@ export class SSHManager extends EventEmitter {
       case 'expect': {
         if (!step.pattern) throw new Error('Expect step is missing a pattern')
         if (step.delayMs) await this.sleep(step.delayMs)
-        await this.waitForPattern(session, step.pattern, step.timeoutMs ?? 5000)
+        const match = await this.waitForPattern(session, step.pattern, step.timeoutMs ?? 5000)
+        // Named groups become variables for the steps that follow, so a button
+        // can act on something the device chose — a generated filename, an
+        // interface name, a job id — rather than only on what it already knew.
+        // Mutates the caller's scope on purpose: that is how `form` already
+        // makes its answers visible to later steps.
+        Object.assign(variables, captureGroups(match))
         return
       }
 
@@ -1166,22 +1445,17 @@ export class SSHManager extends EventEmitter {
         // A timeout here is the "else" path, not a failure.
         let matched = true
         try {
-          await this.waitForPattern(session, step.pattern, step.timeoutMs ?? 5000)
+          const match = await this.waitForPattern(session, step.pattern, step.timeoutMs ?? 5000)
+          // Captures bind on the matching path only — the else branch by
+          // definition has nothing to bind, and leaving stale values from an
+          // earlier iteration would be worse than leaving them unset.
+          Object.assign(variables, captureGroups(match))
         } catch {
           matched = false
         }
 
         const branch = matched ? step.thenSteps : step.elseSteps
-        for (const child of branch ?? []) {
-          if (this.cancelledRuns.has(session.id)) throw new Error('Macro cancelled')
-          try {
-            await this.executeStep(session, child, variables, stack, commands)
-          } catch (error) {
-            if (error instanceof ExitSignal) throw error
-            if (child.continueOnError) continue
-            throw error
-          }
-        }
+        await this.runNestedSteps(session, branch ?? [], variables, stack, commands)
         return
       }
 
@@ -1231,8 +1505,161 @@ export class SSHManager extends EventEmitter {
         return
       }
 
+      case 'download': {
+        if (!step.remotePath) throw new Error('Download step is missing a remote path')
+        if (step.delayMs) await this.sleep(step.delayMs)
+
+        const remote = interpolate(step.remotePath, variables)
+        const root = this.transferDirProvider?.() ?? ''
+
+        // Blank means "call it whatever it is called on the host", which is
+        // what you want when an expect capture supplied the name.
+        const requested = step.localPath
+          ? interpolate(step.localPath, variables)
+          : localNameForRemote(remote)
+
+        const target = resolveInTransferDir(root, requested)
+        await ensureParentDir(target)
+
+        // Saving beside an existing file rather than over it, unless asked:
+        // running the same collection twice is normal and losing the first
+        // result to it is not.
+        const finalPath = step.overwrite ? target : await uniqueLocalPath(target)
+
+        this.emit('macro-progress', session.id, {
+          message: `Downloading ${remote}…`,
+        })
+
+        const { bytes } = await this.downloadFile(session.id, remote, finalPath, (done, total) => {
+          const percent = total > 0 ? Math.floor((done / total) * 100) : 0
+          this.emit('macro-progress', session.id, {
+            message: `Downloading ${remote} — ${percent}% of ${formatBytes(total)}`,
+          })
+        })
+
+        // Where it landed goes into a variable so a later step can act on it,
+        // and into `commands` so the audit trail records the transfer the same
+        // way it records everything else the button did.
+        variables.DOWNLOADED_PATH = finalPath
+        variables.DOWNLOADED_BYTES = String(bytes)
+        commands.push(`sftp get ${remote} -> ${finalPath} (${formatBytes(bytes)})`)
+        return
+      }
+
+      case 'upload': {
+        if (!step.remotePath) throw new Error('Upload step is missing a remote path')
+        if (!step.localPath) throw new Error('Upload step is missing a local path')
+        if (step.delayMs) await this.sleep(step.delayMs)
+
+        const root = this.transferDirProvider?.() ?? ''
+        const source = resolveInTransferDir(root, interpolate(step.localPath, variables))
+        const remote = interpolate(step.remotePath, variables)
+
+        this.emit('macro-progress', session.id, { message: `Uploading ${source}…` })
+
+        const { bytes } = await this.uploadFile(session.id, source, remote, (done, total) => {
+          const percent = total > 0 ? Math.floor((done / total) * 100) : 0
+          this.emit('macro-progress', session.id, {
+            message: `Uploading ${remote} — ${percent}% of ${formatBytes(total)}`,
+          })
+        })
+
+        variables.UPLOADED_PATH = remote
+        variables.UPLOADED_BYTES = String(bytes)
+        commands.push(`sftp put ${source} -> ${remote} (${formatBytes(bytes)})`)
+        return
+      }
+
+      case 'while': {
+        if (!step.pattern) throw new Error('While step is missing a pattern')
+
+        // The ceiling is applied here as well as in the schema: a bundle is
+        // untrusted input, and a hand-edited maxIterations must not be able to
+        // hold a shell open indefinitely.
+        const limit = Math.min(step.maxIterations || DEFAULT_LOOP_LIMIT, MAX_LOOP_ITERATIONS)
+        // Per iteration, not for the whole loop: the point is to poll.
+        const perIteration = step.timeoutMs ?? 5000
+
+        for (let iteration = 0; iteration < limit; iteration++) {
+          if (this.cancelledRuns.has(session.id)) throw new Error('Macro cancelled')
+
+          // Check first, so a device already finished runs the body zero times
+          // rather than once. `while`, not `do while`.
+          try {
+            const match = await this.waitForPattern(session, step.pattern, perIteration)
+            Object.assign(variables, captureGroups(match))
+            return
+          } catch {
+            /* not done yet — run the body and look again */
+          }
+
+          await this.runNestedSteps(session, step.thenSteps ?? [], variables, stack, commands)
+        }
+
+        // Falling out of the loop is a failure, not a quiet success: the button
+        // said "wait until this happens" and it did not happen.
+        throw new Error(
+          `Gave up waiting for "${step.pattern}" after ${limit} attempts. ` +
+            'Raise the iteration limit or the per-attempt timeout if the device is just slow.'
+        )
+      }
+
+      case 'forEach': {
+        if (!step.listVariable) throw new Error('For-each step is missing a list variable')
+
+        const raw = variables[step.listVariable] ?? ''
+        const items = splitList(raw, step.listSeparator)
+        const limit = Math.min(step.maxIterations || DEFAULT_LOOP_LIMIT, MAX_LOOP_ITERATIONS)
+        const itemName = step.itemVariable || 'ITEM'
+
+        if (items.length > limit) {
+          throw new Error(
+            `${step.listVariable} holds ${items.length} items but the limit is ${limit}. ` +
+              'Raise the limit deliberately rather than running an unexpected number of commands.'
+          )
+        }
+
+        for (let index = 0; index < items.length; index++) {
+          if (this.cancelledRuns.has(session.id)) throw new Error('Macro cancelled')
+
+          // Index alongside the item: numbering output, or naming one file per
+          // iteration, both need it and neither is worth a second step.
+          variables[itemName] = items[index]
+          variables[`${itemName}_INDEX`] = String(index + 1)
+
+          await this.runNestedSteps(session, step.thenSteps ?? [], variables, stack, commands)
+        }
+        return
+      }
+
       default:
         return
+    }
+  }
+
+  /**
+   * Runs a nested block — the body of `if`, `while` or `forEach`.
+   *
+   * Extracted so all three honour cancellation between children and treat
+   * `continueOnError` and `ExitSignal` identically. They had drifted once
+   * already when `if` was the only one.
+   */
+  private async runNestedSteps(
+    session: SSHSession,
+    steps: MacroStep[],
+    variables: Record<string, string>,
+    stack: CallFrame[],
+    commands: string[]
+  ): Promise<void> {
+    for (const child of steps) {
+      if (this.cancelledRuns.has(session.id)) throw new Error('Macro cancelled')
+      try {
+        await this.executeStep(session, child, variables, stack, commands)
+      } catch (error) {
+        if (error instanceof ExitSignal) throw error
+        if (child.continueOnError) continue
+        throw error
+      }
     }
   }
 
@@ -1260,7 +1687,19 @@ export class SSHManager extends EventEmitter {
     return scope
   }
 
-  private waitForPattern(session: SSHSession, pattern: string, timeoutMs: number): Promise<void> {
+  /**
+   * Waits for `pattern` and resolves with the match.
+   *
+   * The match is returned rather than discarded so named capture groups can
+   * become variables — `(?<CAPFILE>/tmp/cap-\d+\.pcap)` binds `{{CAPFILE}}` for
+   * the steps that follow. Without that, a step can only reference a filename
+   * it already knew, which rules out anything the device chose itself.
+   */
+  private waitForPattern(
+    session: SSHSession,
+    pattern: string,
+    timeoutMs: number
+  ): Promise<RegExpMatchArray> {
     return new Promise((resolve, reject) => {
       let regex: RegExp
       try {
@@ -1273,19 +1712,23 @@ export class SSHManager extends EventEmitter {
       let buffer = ''
       let settled = false
 
-      const finish = (error?: Error) => {
+      const finish = (error?: Error, match?: RegExpMatchArray) => {
         if (settled) return
         settled = true
         clearTimeout(timer)
         session.off('output', onOutput)
-        error ? reject(error) : resolve()
+        if (error) reject(error)
+        else resolve(match!)
       }
 
       const onOutput = (text: string) => {
         buffer += text
-        // Cap the buffer so long-running waits cannot grow without bound.
+        // Cap the buffer so long-running waits cannot grow without bound. The
+        // tail is kept, so a match still works on the most recent output — but
+        // a capture group can only see what survived the trim.
         if (buffer.length > 65536) buffer = buffer.slice(-32768)
-        if (regex.test(buffer)) finish()
+        const match = buffer.match(regex)
+        if (match) finish(undefined, match)
       }
 
       const timer = setTimeout(

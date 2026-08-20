@@ -204,10 +204,28 @@ export const MACRO_STEP_TYPES = [
   'pause',
   /** Branch on whether a pattern appears before the timeout. */
   'if',
+  /**
+   * Repeat until a pattern appears — polling a device until it says it is
+   * done. Always bounded by `maxIterations`; see the engine for why an
+   * unbounded loop against a live device is not on offer.
+   */
+  'while',
+  /**
+   * Run the body once per item in a list held in a variable — the interfaces
+   * an `expect` just captured, a list typed into a form.
+   */
+  'forEach',
   /** Stop this macro (and optionally the whole run) early. */
   'exit',
   /** Copy a script from the library to the host, run it, then delete it. */
   'runScript',
+  /**
+   * Fetch a file from the host over SFTP — the capture a button just made,
+   * a config it just wrote.
+   */
+  'download',
+  /** Send a local file to the host over SFTP. */
+  'upload',
   /** Run another button's script. */
   'callMacro',
   /** Run every button in another set, in order. */
@@ -269,6 +287,51 @@ const MacroStepBase = z.object({
   args: z.record(z.string()).default({}),
   /** Keep going if this step fails instead of aborting the macro. */
   continueOnError: z.boolean().default(false),
+
+  /**
+   * `while` / `forEach`: hard cap on iterations.
+   *
+   * Mandatory in effect — the engine applies a ceiling whatever this says.
+   * A loop that cannot terminate is bad enough in a script; against a live
+   * switch, with a button somebody shared, it is a way to hold a shell open
+   * forever issuing commands nobody is reading.
+   */
+  maxIterations: z.number().min(1).max(1000).default(50),
+
+  /** `forEach`: name of the variable holding the list to walk. */
+  listVariable: optionalText,
+  /**
+   * `forEach`: name bound to each item in turn. Defaults to `ITEM`.
+   */
+  itemVariable: optionalText,
+  /**
+   * `forEach`: what separates the items. `lines` suits captured command
+   * output; `comma` suits something typed into a form.
+   */
+  listSeparator: z.enum(['lines', 'comma', 'whitespace']).default('lines'),
+
+  /**
+   * `download` / `upload`: path on the host. Supports `{{var}}`, which is the
+   * point — an `expect` capture can name a file the device chose itself.
+   */
+  remotePath: optionalText,
+  /**
+   * `download` / `upload`: path relative to the configured transfer folder.
+   *
+   * Relative on purpose. An absolute path in a shared button could read a
+   * private key on upload or overwrite something on download, so the engine
+   * resolves this inside the transfer folder and refuses anything escaping it.
+   * Left blank on a download, the remote filename is used.
+   */
+  localPath: optionalText,
+  /**
+   * `download`: replace an existing local file instead of saving beside it.
+   *
+   * Off by default. Collecting the same file twice is normal — the same button
+   * against the same host an hour later — and silently replacing the earlier
+   * result is the outcome nobody asks for.
+   */
+  overwrite: z.boolean().default(false),
 })
 
 export type MacroStep = z.infer<typeof MacroStepBase> & {
@@ -421,6 +484,17 @@ export const SettingsSchema = z.object({
   scriptLibraryDir: z.string().default(''),
   /** Where scripts are staged on the host before running. */
   scriptRemoteDir: z.string().default('/tmp'),
+
+  /**
+   * Folder that `download` and `upload` steps are confined to.
+   *
+   * Both directions are restricted to it, and that is a security boundary
+   * rather than tidiness: a button from the exchange could otherwise read a
+   * private key off this machine and upload it somewhere, which would look
+   * like a perfectly ordinary run. Blank means a `transfers` folder inside the
+   * app's own data directory.
+   */
+  transferDir: z.string().default(''),
 
   // Workspace layout
   layoutMode: LayoutModeSchema.default('tabs'),

@@ -81,7 +81,17 @@ export default function MacroPanel() {
   const [showSetForm, setShowSetForm] = useState(false)
   /** Existing set open for editing — name, description and tags. */
   const [editingSet, setEditingSet] = useState<MacroSet | null>(null)
-  const [running, setRunning] = useState(false)
+  /**
+   * Busy state comes from the main process per session, not from a local
+   * boolean. A single flag disabled every button on every host while any one
+   * macro ran, which is what made a long-running button unusable: press it and
+   * you were pinned to that host until it finished.
+   */
+  const runningMacros = useStore((state) => state.runningMacros)
+  const busyHere = activeSessionId
+    ? runningMacros.find((item) => item.sessionId === activeSessionId)
+    : undefined
+  const running = Boolean(busyHere)
   const [status, setStatus] = useState<string | null>(null)
   const [prompting, setPrompting] = useState<{ macro: Macro; fields: FormField[] } | null>(null)
   /** Button waiting for a destination set in the copy dialog. */
@@ -216,7 +226,6 @@ export default function MacroPanel() {
     const targets = macroTargets(sessions, activeSessionId, broadcastInput)
     if (targets.length === 0) return
 
-    setRunning(true)
     setStatus(`Running ${macro.name} on ${describeTargets(targets)}...`)
 
     // The form is answered once and the same values go to every session, so a
@@ -230,8 +239,6 @@ export default function MacroPanel() {
         }))
       )
     )
-
-    setRunning(false)
 
     const failures = results.filter(({ result }) => !result.success)
     if (failures.length === 0) {

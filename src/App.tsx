@@ -66,6 +66,9 @@ function App() {
       // window is detached, so a window that loads later — or reloads — would
       // render a duplicate pane for a session already shown elsewhere.
       loadSessionPlacement(),
+      // A window that opens or reloads while a macro is running would otherwise
+      // show no busy indicator until the run happened to end.
+      useStore.getState().loadRunningMacros(),
     ])
   }, [])
 
@@ -85,6 +88,12 @@ function App() {
     const onProgress = ({ sessionId, progress }: { sessionId: string; progress: any }) =>
       setMacroProgress(sessionId, progress)
 
+    // Kept in the store rather than derived per component: the busy state has
+    // to be right in the session tabs, the button panel and the close handler,
+    // and a window that opened late gets the full set on mount.
+    const onRunningChanged = ({ running }: { running: any[] }) =>
+      useStore.getState().setRunningMacros(running)
+
     const onFormRequest = (payload: any) => setPendingForm(payload)
 
     const onConfirmRequest = (payload: any) => setPendingConfirm(payload)
@@ -103,6 +112,7 @@ function App() {
 
     window.electronAPI.on('session-log-changed', onLogChanged)
     window.electronAPI.on('macro-progress', onProgress)
+    window.electronAPI.on('macro-running-changed', onRunningChanged)
     window.electronAPI.on('macro-form-request', onFormRequest)
     window.electronAPI.on('macro-confirm-request', onConfirmRequest)
     window.electronAPI.on('session-status-changed', onStatus)
@@ -112,6 +122,7 @@ function App() {
     return () => {
       window.electronAPI.off('session-log-changed', onLogChanged)
       window.electronAPI.off('macro-progress', onProgress)
+      window.electronAPI.off('macro-running-changed', onRunningChanged)
       window.electronAPI.off('macro-form-request', onFormRequest)
       window.electronAPI.off('macro-confirm-request', onConfirmRequest)
       window.electronAPI.off('session-status-changed', onStatus)

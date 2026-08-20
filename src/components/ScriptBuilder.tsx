@@ -79,6 +79,18 @@ const BLOCKS: Record<MacroStepType, BlockMeta> = {
     accent: 'border-l-orange-500',
     chip: 'bg-orange-600',
   },
+  while: {
+    label: 'Repeat until…',
+    hint: 'Run the body until output matches. Always capped.',
+    accent: 'border-l-teal-500',
+    chip: 'bg-teal-600',
+  },
+  forEach: {
+    label: 'For each item',
+    hint: 'Run the body once per item in a list variable',
+    accent: 'border-l-teal-500',
+    chip: 'bg-teal-600',
+  },
   exit: {
     label: 'Exit',
     hint: 'Stop the script',
@@ -88,6 +100,18 @@ const BLOCKS: Record<MacroStepType, BlockMeta> = {
   runScript: {
     label: 'Run script file',
     hint: 'Copy a script to the host, run it, delete it',
+    accent: 'border-l-cyan-500',
+    chip: 'bg-cyan-600',
+  },
+  download: {
+    label: 'Download file',
+    hint: 'Fetch a file from the host over SFTP',
+    accent: 'border-l-cyan-500',
+    chip: 'bg-cyan-600',
+  },
+  upload: {
+    label: 'Upload file',
+    hint: 'Send a local file to the host over SFTP',
     accent: 'border-l-cyan-500',
     chip: 'bg-cyan-600',
   },
@@ -113,7 +137,11 @@ const PALETTE: MacroStepType[] = [
   'confirm',
   'pause',
   'if',
+  'while',
+  'forEach',
   'runScript',
+  'download',
+  'upload',
   'callMacro',
   'callSet',
   'exit',
@@ -124,9 +152,10 @@ export function makeStep(type: MacroStepType): MacroStep {
     type,
     text: '',
     appendEnter: type === 'send',
-    pattern: type === 'expect' || type === 'if' ? '\\$ $' : undefined,
+    pattern: type === 'expect' || type === 'if' || type === 'while' ? '\\$ $' : undefined,
     delayMs: 0,
-    timeoutMs: type === 'expect' || type === 'if' ? 10000 : undefined,
+    // For `while` this is the wait per attempt, not for the whole loop.
+    timeoutMs: type === 'expect' || type === 'if' || type === 'while' ? 10000 : undefined,
     args: {},
     fields: [],
     // A confirm is only worth adding for something worth stopping, so it
@@ -140,8 +169,17 @@ export function makeStep(type: MacroStepType): MacroStep {
     // cleanup is on unless the operator turns it off.
     cleanupAfterRun: true,
     remoteDir: type === 'runScript' ? '/tmp' : undefined,
+    remotePath: type === 'download' || type === 'upload' ? '' : undefined,
+    localPath: undefined,
+    overwrite: false,
     continueOnError: false,
     exitAll: false,
+    // Loops are capped by the engine whatever this says; the default is a
+    // number a person would pick, not the ceiling.
+    maxIterations: 50,
+    listVariable: type === 'forEach' ? 'ITEMS' : undefined,
+    itemVariable: type === 'forEach' ? 'ITEM' : undefined,
+    listSeparator: 'lines' as const,
     thenSteps: [],
     elseSteps: [],
   }
@@ -364,26 +402,205 @@ function StepList({ steps, onChange, macros, macroSets, currentMacroId, depth }:
                 </>
               )}
 
-              {(step.type === 'expect' || step.type === 'if') && (
-                <div className="flex flex-wrap items-center gap-2">
-                  <input
-                    value={step.pattern ?? ''}
-                    onChange={(event) => update(index, { pattern: event.target.value })}
-                    placeholder="regex to wait for, e.g. \\$ $ or Password:"
-                    className={`${inputClass} flex-1 font-mono`}
-                  />
-                  <label className="flex items-center gap-1 text-xs text-gray-400">
-                    Timeout (ms)
+              {(step.type === 'expect' || step.type === 'if' || step.type === 'while') && (
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
                     <input
-                      type="number"
-                      min={0}
-                      value={step.timeoutMs ?? 10000}
-                      onChange={(event) =>
-                        update(index, { timeoutMs: Math.max(0, Number(event.target.value) || 0) })
-                      }
-                      className={`${inputClass} w-24`}
+                      value={step.pattern ?? ''}
+                      onChange={(event) => update(index, { pattern: event.target.value })}
+                      placeholder="regex to wait for, e.g. \\$ $ or Password:"
+                      className={`${inputClass} flex-1 font-mono`}
                     />
-                  </label>
+                    <label className="flex items-center gap-1 text-xs text-gray-400">
+                      {step.type === 'while' ? 'Per attempt (ms)' : 'Timeout (ms)'}
+                      <input
+                        type="number"
+                        min={0}
+                        value={step.timeoutMs ?? 10000}
+                        onChange={(event) =>
+                          update(index, { timeoutMs: Math.max(0, Number(event.target.value) || 0) })
+                        }
+                        className={`${inputClass} w-24`}
+                      />
+                    </label>
+                  </div>
+                  <p className="text-[11px] text-gray-500">
+                    Named groups become variables — <code className="text-gray-400">
+                      {'(?<CAPFILE>/tmp/cap-\\d+\\.pcap)'}
+                    </code>{' '}
+                    sets <code className="text-gray-400">{'{{CAPFILE}}'}</code> for later steps.
+                  </p>
+                </>
+              )}
+
+              {(step.type === 'download' || step.type === 'upload') && (
+                <div className="space-y-2">
+                  <input
+                    value={step.remotePath ?? ''}
+                    onChange={(event) => update(index, { remotePath: event.target.value })}
+                    placeholder={
+                      step.type === 'download'
+                        ? 'Path on the host, e.g. /tmp/cap-{{EPOCH}}.pcap or {{CAPFILE}}'
+                        : 'Destination on the host, e.g. /tmp/{{ITEM}}'
+                    }
+                    className={`${inputClass} w-full font-mono`}
+                  />
+                  <input
+                    value={step.localPath ?? ''}
+                    onChange={(event) => update(index, { localPath: event.target.value })}
+                    placeholder={
+                      step.type === 'download'
+                        ? 'Save as (optional) — blank uses the name on the host'
+                        : 'File to send, relative to the transfer folder'
+                    }
+                    className={`${inputClass} w-full font-mono`}
+                  />
+
+                  {step.type === 'download' && (
+                    <label className="flex items-center gap-1 text-xs text-gray-400">
+                      <input
+                        type="checkbox"
+                        checked={step.overwrite ?? false}
+                        onChange={(event) => update(index, { overwrite: event.target.checked })}
+                        className="rounded border-gray-600 bg-gray-700 text-blue-500"
+                      />
+                      Replace an existing file instead of saving a numbered copy
+                    </label>
+                  )}
+
+                  <p className="text-[11px] text-gray-500">
+                    Both paths stay inside the transfer folder set in Settings — a button cannot
+                    reach elsewhere on this machine.
+                    {step.type === 'download' && (
+                      <>
+                        {' '}
+                        After it runs,{' '}
+                        <code className="text-gray-400">{'{{DOWNLOADED_PATH}}'}</code> holds where
+                        the file landed.
+                      </>
+                    )}
+                  </p>
+                </div>
+              )}
+
+              {step.type === 'while' && (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="flex items-center gap-1 text-xs text-gray-400">
+                      Give up after
+                      <input
+                        type="number"
+                        min={1}
+                        max={1000}
+                        value={step.maxIterations ?? 50}
+                        onChange={(event) =>
+                          update(index, {
+                            maxIterations: Math.min(1000, Math.max(1, Number(event.target.value) || 1)),
+                          })
+                        }
+                        className={`${inputClass} w-20`}
+                      />
+                      attempts
+                    </label>
+                  </div>
+                  <p className="text-[11px] text-gray-500">
+                    Checks first, so a device that is already finished runs the body zero times.
+                    Giving up is treated as a failure — the script asked for something that never
+                    happened.
+                  </p>
+                  <div className="rounded border border-teal-700/50 bg-teal-950/20 p-2">
+                    <div className="text-[11px] font-semibold text-teal-300 mb-1">
+                      Body — runs between attempts
+                    </div>
+                    <StepList
+                      steps={step.thenSteps ?? []}
+                      onChange={(thenSteps) => update(index, { thenSteps })}
+                      macros={macros}
+                      macroSets={macroSets}
+                      currentMacroId={currentMacroId}
+                      depth={depth + 1}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {step.type === 'forEach' && (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="flex items-center gap-1 text-xs text-gray-400">
+                      List in
+                      <input
+                        value={step.listVariable ?? ''}
+                        onChange={(event) => update(index, { listVariable: event.target.value })}
+                        placeholder="ITEMS"
+                        className={`${inputClass} w-28 font-mono`}
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-xs text-gray-400">
+                      split by
+                      <select
+                        value={step.listSeparator ?? 'lines'}
+                        onChange={(event) =>
+                          update(index, {
+                            listSeparator: event.target.value as 'lines' | 'comma' | 'whitespace',
+                          })
+                        }
+                        className={inputClass}
+                      >
+                        <option value="lines">lines</option>
+                        <option value="comma">commas</option>
+                        <option value="whitespace">spaces</option>
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-1 text-xs text-gray-400">
+                      each as
+                      <input
+                        value={step.itemVariable ?? ''}
+                        onChange={(event) => update(index, { itemVariable: event.target.value })}
+                        placeholder="ITEM"
+                        className={`${inputClass} w-24 font-mono`}
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-xs text-gray-400">
+                      max
+                      <input
+                        type="number"
+                        min={1}
+                        max={1000}
+                        value={step.maxIterations ?? 50}
+                        onChange={(event) =>
+                          update(index, {
+                            maxIterations: Math.min(1000, Math.max(1, Number(event.target.value) || 1)),
+                          })
+                        }
+                        className={`${inputClass} w-20`}
+                      />
+                    </label>
+                  </div>
+                  <p className="text-[11px] text-gray-500">
+                    <code className="text-gray-400">
+                      {`{{${step.itemVariable || 'ITEM'}}}`}
+                    </code>{' '}
+                    is the current item and{' '}
+                    <code className="text-gray-400">
+                      {`{{${step.itemVariable || 'ITEM'}_INDEX}}`}
+                    </code>{' '}
+                    counts from 1. A longer list than the maximum stops the script rather than
+                    running more commands than you expected.
+                  </p>
+                  <div className="rounded border border-teal-700/50 bg-teal-950/20 p-2">
+                    <div className="text-[11px] font-semibold text-teal-300 mb-1">
+                      Body — runs once per item
+                    </div>
+                    <StepList
+                      steps={step.thenSteps ?? []}
+                      onChange={(thenSteps) => update(index, { thenSteps })}
+                      macros={macros}
+                      macroSets={macroSets}
+                      currentMacroId={currentMacroId}
+                      depth={depth + 1}
+                    />
+                  </div>
                 </div>
               )}
 

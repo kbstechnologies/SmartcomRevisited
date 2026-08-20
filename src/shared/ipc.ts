@@ -49,7 +49,34 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
     channel: z.literal('sessions:open-many'),
     data: z.object({ profileIds: z.array(z.string()).min(1) }),
   }),
-  z.object({ channel: z.literal('sessions:close'), data: z.object({ sessionId: z.string() }) }),
+  z.object({
+    channel: z.literal('sessions:close'),
+    data: z.object({
+      sessionId: z.string(),
+      /**
+       * Close even though a macro is running. Absent, the main process refuses
+       * and reports what is in flight so the renderer can ask — the check lives
+       * there rather than in the renderer because the renderer's idea of
+       * "busy" is a broadcast it may have missed.
+       */
+      force: z.boolean().default(false),
+    }),
+  }),
+  /** Macros in flight, so a window that just opened can render the indicators. */
+  z.object({ channel: z.literal('macros:running'), data: z.any().optional() }),
+  /**
+   * Reads a SecureCRT session store and reports what *would* be imported.
+   * Separate from the write so nothing lands before it has been seen.
+   */
+  z.object({
+    channel: z.literal('profiles:scan-securecrt'),
+    data: z.object({ folder: z.string().optional() }).default({}),
+  }),
+  /** Creates the connections a scan proposed. */
+  z.object({
+    channel: z.literal('profiles:import-securecrt'),
+    data: z.object({ folder: z.string() }),
+  }),
   // Raw output so far, so a pane that mounts after the session started — a
   // popped-out window, a reloaded one — shows the history instead of nothing.
   z.object({ channel: z.literal('sessions:scrollback'), data: z.object({ sessionId: z.string() }) }),
@@ -304,6 +331,8 @@ export const EVENT_CHANNELS = [
   'session-data',
   'session-log-changed',
   'macro-progress',
+  /** The full set of in-flight macros, whenever one starts or finishes. */
+  'macro-running-changed',
   'macro-form-request',
   'macro-confirm-request',
   'ai-stream',

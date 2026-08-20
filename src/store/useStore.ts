@@ -20,6 +20,15 @@ import type {
 import type { AiSettings, AiAsk, AiStreamEvent, AssistantTurn } from '@shared/ai'
 import type { GlobalVar, GlobalVarProblem } from '@shared/global-vars'
 
+/** A macro in flight, as reported by the main process. */
+export interface RunningMacro {
+  sessionId: string
+  macroId: string
+  macroName: string
+  profileName: string
+  startedAt: string
+}
+
 /** The global variables file as the main process last read it. */
 export interface GlobalVarsState {
   /** Where the file is, shown in the editor so it can be found on disk. */
@@ -83,6 +92,10 @@ interface AppStore {
   sessionLogs: Record<string, string>
   /** Session id → latest macro progress report. */
   macroProgress: Record<string, MacroProgress>
+  /** Macros in flight across every session, mirrored from the main process. */
+  runningMacros: RunningMacro[]
+  setRunningMacros: (running: RunningMacro[]) => void
+  loadRunningMacros: () => Promise<void>
   pendingForm: PendingFormRequest | null
   pendingConfirm: PendingConfirmRequest | null
   /** Which modal is open. Shared so the command palette can open them too. */
@@ -191,6 +204,21 @@ interface AppStore {
     unsupported: Array<{ name: string; reason: string }>
   }>
   importConnections: () => Promise<{ groups: number; profiles: number; renamed: Array<{ from: string; to: string }> }>
+  /** Reads a SecureCRT session store and reports what would be imported. */
+  scanSecureCrt: () => Promise<{
+    folder: string
+    scanned: number
+    candidates: Array<{ name: string; group?: string; transport: string; host?: string }>
+    skipped: Array<{ name: string; reason: string }>
+    unsupported: Array<{ name: string; reason: string }>
+  }>
+  /** Creates the connections a scan proposed. */
+  importSecureCrt: (folder: string) => Promise<{
+    imported: number
+    renamed: Array<{ from: string; to: string }>
+    skipped: Array<{ name: string; reason: string }>
+    unsupported: Array<{ name: string; reason: string }>
+  }>
 
   loadConnectionGroups: () => Promise<void>
   saveConnectionGroup: (group: ConnectionGroup) => Promise<ConnectionGroup>
@@ -201,7 +229,15 @@ interface AppStore {
   loadSessions: () => Promise<void>
   openSession: (profileId: string) => Promise<string>
   openSessions: (profileIds: string[]) => Promise<OpenSessionOutcome[]>
-  closeSession: (sessionId: string) => Promise<boolean>
+  /**
+   * Closes a session. Refused when a macro is running unless `force` is set —
+   * the refusal comes back as `blockedBy` so the caller can name what would be
+   * lost rather than asking a generic question.
+   */
+  closeSession: (
+    sessionId: string,
+    force?: boolean
+  ) => Promise<{ closed: boolean; blockedBy?: RunningMacro }>
   sendToSession: (sessionId: string, text: string) => Promise<boolean>
   /** Clipboard text, sent as a paste rather than as keystrokes. */
   pasteToSession: (sessionId: string, text: string) => Promise<boolean>
@@ -316,6 +352,7 @@ const useStore = create<AppStore>((set, get) => ({
   broadcastInput: false,
   sessionLogs: {},
   macroProgress: {},
+  runningMacros: [],
   pendingForm: null,
   pendingConfirm: null,
   activeDialog: null,
@@ -481,6 +518,11 @@ const useStore = create<AppStore>((set, get) => ({
   setMacroProgress: (sessionId, progress) =>
     set((state) => ({ macroProgress: { ...state.macroProgress, [sessionId]: progress } })),
 
+  setRunningMacros: (running) => set({ runningMacros: running }),
+
+  loadRunningMacros: async () =>
+    set({ runningMacros: await invoke<RunningMacro[]>('macros:running') }),
+
   setSessionLog: (sessionId, logPath) =>
     set((state) => {
       const sessionLogs = { ...state.sessionLogs }
@@ -520,6 +562,10 @@ const useStore = create<AppStore>((set, get) => ({
     invoke('profiles:export', { profileIds }),
 
   exportConnectionsForSecureCrt: async (input) => invoke('profiles:export-securecrt', input),
+
+  scanSecureCrt: async () => invoke('profiles:scan-securecrt', {}),
+
+  importSecureCrt: async (folder) => invoke('profiles:import-securecrt', { folder }),
 
   importConnections: async () => {
     const result = await invoke<{ groups: number; profiles: number; renamed: Array<{ from: string; to: string }> }>('profiles:import')
@@ -588,13 +634,21 @@ const useStore = create<AppStore>((set, get) => ({
     return opened
   },
 
-  closeSession: async (sessionId) => {
-    const { closed } = await invoke<{ closed: boolean }>('sessions:close', { sessionId })
+  closeSession: async (sessionId, force = false) => {
+    const result = await invoke<{ closed: boolean; blockedBy?: RunningMacro }>('sessions:close', {
+      sessionId,
+      force,
+    })
+
+    // Refused because a macro is running: hand the detail back so the caller
+    // can ask, and leave the session and its buffers alone.
+    if (result.blockedBy) return result
+
     get().setSessionLog(sessionId, null)
     // Retained output would otherwise outlive the session it belongs to.
     clearSessionBuffer(sessionId)
     await get().loadSessions()
-    return closed
+    return result
   },
 
   sendToSession: async (sessionId, text) => {

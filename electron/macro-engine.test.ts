@@ -22,7 +22,8 @@ function makeFakeSession(id = 'session-1') {
   const session: any = Object.assign(new EventEmitter(), {
     id,
     profile: { id: 'p1', name: 'test', host: 'h', port: 22, username: 'u', authMethod: 'password' },
-    client: {},
+    // `end` is stubbed rather than omitted so closeSession can be exercised.
+    client: { end: () => undefined },
     status: 'connected',
     lastActivity: new Date(),
     createdAt: new Date(),
@@ -548,5 +549,131 @@ describe('macro engine', () => {
     const result = await manager.runMacro('missing', macro('n', [{ type: 'send', text: 'x' }]), {})
     expect(result.success).toBe(false)
     expect(result.error).toBe('Session not connected')
+  })
+})
+
+/**
+ * The run lock.
+ *
+ * Two macros on one shell were previously impossible only because the button
+ * panel disabled every button while any macro ran anywhere. That flag was
+ * global, so it also blocked work on other hosts — removing it is what makes a
+ * long-running button usable, and what turns this from theory into the thing
+ * keeping the shell coherent.
+ */
+describe('one macro per session', () => {
+  let manager: SSHManager
+
+  beforeEach(() => {
+    manager = new SSHManager('/tmp/logs')
+  })
+
+  it('refuses a second macro on the same session, naming what is running', async () => {
+    const { session, written } = makeFakeSession()
+    withSession(manager, session)
+
+    // A pause parks the first run indefinitely, which is what a long capture
+    // looks like from the engine's point of view.
+    const first = manager.runMacro(session.id, macro('capture', [{ type: 'pause' }]), {})
+    await new Promise((resolve) => setImmediate(resolve))
+
+    const second = await manager.runMacro(
+      session.id,
+      macro('other', [{ type: 'send', text: 'show version', appendEnter: true }]),
+      {}
+    )
+
+    expect(second.success).toBe(false)
+    expect(second.error).toMatch(/capture/)
+    expect(second.error).toMatch(/already running/i)
+    // The refused run must not have written into the shell the first one owns.
+    expect(written).toEqual([])
+
+    manager.resumeMacro(session.id)
+    await first
+  })
+
+  it('allows the same macro on a different session at the same time', async () => {
+    const a = makeFakeSession('session-a')
+    const b = makeFakeSession('session-b')
+    withSession(manager, a.session)
+    withSession(manager, b.session)
+
+    const running = manager.runMacro(a.session.id, macro('long', [{ type: 'pause' }]), {})
+    await new Promise((resolve) => setImmediate(resolve))
+
+    // This is the whole point: host A being busy must not block host B.
+    const other = await manager.runMacro(
+      b.session.id,
+      macro('quick', [{ type: 'send', text: 'uptime', appendEnter: true }]),
+      {}
+    )
+
+    expect(other.success).toBe(true)
+    expect(b.written).toEqual(['uptime\n'])
+
+    manager.resumeMacro(a.session.id)
+    await running
+  })
+
+  it('reports what is in flight, for the close and quit warnings', async () => {
+    const { session } = makeFakeSession()
+    withSession(manager, session)
+
+    expect(manager.listRunningMacros()).toEqual([])
+    expect(manager.isSessionBusy(session.id)).toBe(false)
+
+    const run = manager.runMacro(session.id, macro('capture', [{ type: 'pause' }]), {})
+    await new Promise((resolve) => setImmediate(resolve))
+
+    const running = manager.listRunningMacros()
+    expect(running).toHaveLength(1)
+    expect(running[0].macroName).toBe('capture')
+    // Named by host, so a warning can say which box rather than a session id.
+    expect(running[0].profileName).toBe('test')
+    expect(manager.isSessionBusy(session.id)).toBe(true)
+
+    manager.resumeMacro(session.id)
+    await run
+
+    expect(manager.listRunningMacros()).toEqual([])
+    expect(manager.isSessionBusy(session.id)).toBe(false)
+  })
+
+  it('releases the lock when a run fails, not just when it finishes', async () => {
+    const { session } = makeFakeSession()
+    withSession(manager, session)
+
+    // An expect with no pattern throws inside the engine.
+    const failed = await manager.runMacro(session.id, macro('broken', [{ type: 'expect' }]), {})
+    expect(failed.success).toBe(false)
+
+    // A lock left behind by a failure would strand the host forever.
+    expect(manager.isSessionBusy(session.id)).toBe(false)
+
+    const after = await manager.runMacro(
+      session.id,
+      macro('after', [{ type: 'send', text: 'uptime', appendEnter: true }]),
+      {}
+    )
+    expect(after.success).toBe(true)
+  })
+
+  it('frees the lock when the session is closed mid-run', async () => {
+    const { session } = makeFakeSession()
+    withSession(manager, session)
+
+    const run = manager.runMacro(session.id, macro('capture', [{ type: 'pause' }]), {})
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(manager.isSessionBusy(session.id)).toBe(true)
+
+    // Closing takes the shell away; the lock must not outlive it, or the id
+    // stays "busy" forever and the warnings name a host that is long gone.
+    manager.closeSession(session.id)
+    expect(manager.isSessionBusy(session.id)).toBe(false)
+    expect(manager.listRunningMacros()).toEqual([])
+
+    manager.cancelMacro(session.id)
+    await run
   })
 })

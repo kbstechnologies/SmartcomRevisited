@@ -1,10 +1,11 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, clipboard } from 'electron'
 import { basename, join } from 'path'
 import { hostname } from 'os'
-import { writeFileSync, readFileSync } from 'fs'
+import { writeFileSync, readFileSync, mkdirSync } from 'fs'
+import { stat } from 'fs/promises'
 import { keytar, getKeychainManager } from './keychain'
 import { DatabaseManager } from './database'
-import { SSHManager, buildScriptCommand } from './ssh-manager'
+import { SSHManager, buildScriptCommand, type RunningMacro } from './ssh-manager'
 import { listLibrary, readScript } from './script-library'
 import {
   ensureGlobalsFile,
@@ -21,10 +22,17 @@ import {
   writePrivateKeyFile,
 } from './key-manager'
 import { importInstructions, toSecureCrtCsv } from '../src/shared/securecrt'
+import { defaultSessionPaths } from '../src/shared/securecrt-import'
+import { readSecureCrtStore } from './securecrt-store'
 import type { IpcResponse } from '../src/shared/ipc'
 import { IpcRequestSchema } from '../src/shared/ipc'
 import type { AuditLog, Settings } from '../src/shared/types'
-import { ButtonSetBundleSchema, ConnectionBundleSchema, interpolate } from '../src/shared/types'
+import {
+  ButtonSetBundleSchema,
+  ConnectionBundleSchema,
+  ProfileSchema,
+  interpolate,
+} from '../src/shared/types'
 import { APP_NAME, REPOSITORY_URL, VAULT_SERVICE } from '../src/shared/constants'
 import { UpdateService, packageKind } from './updater'
 import { migrateLegacyUserData } from './migrate-legacy-data'
@@ -61,6 +69,8 @@ class SmartcomRevisitedApp {
   private assistant!: Assistant
   private updates!: UpdateService
   private userMachine: string
+  /** Set once the operator has agreed to quit with macros still running. */
+  private quitConfirmed = false
 
   constructor() {
     this.userMachine = `${process.env.USER || process.env.USERNAME || 'user'}@${hostname()}`
@@ -115,6 +125,10 @@ class SmartcomRevisitedApp {
     // value edited in another editor is live on the next button press.
     this.sshManager.setGlobalVariableProvider(() => loadGlobals(this.globalsPath()).values)
 
+    // Read per run rather than captured once, so changing the folder in
+    // Settings takes effect on the next button press.
+    this.sshManager.setTransferDirProvider(() => this.transferRoot())
+
     this.sshManager.setPrivateKeyProvider(async (keyId) => {
       const privateKey = await keytar.getPassword(VAULT_SERVICE, keyVaultAccount(keyId))
       if (!privateKey) return null
@@ -136,6 +150,12 @@ class SmartcomRevisitedApp {
 
     this.sshManager.on('macro-progress', (sessionId: string, progress: unknown) => {
       this.windows.broadcast('macro-progress', { sessionId, progress })
+    })
+
+    // Every window needs this, not just the one that pressed the button: the
+    // busy indicator and the close warning have to be right in a pop-out too.
+    this.sshManager.on('macro-running-changed', (running: RunningMacro[]) => {
+      this.windows.broadcast('macro-running-changed', { running })
     })
 
     this.sshManager.on('macro-form-request', (sessionId: string, payload: unknown) => {
@@ -212,6 +232,22 @@ class SmartcomRevisitedApp {
   }
 
   /**
+   * Folder that `upload` and `download` steps are confined to.
+   *
+   * Unlike the script library this always resolves to something: a transfer
+   * button that failed because no folder was configured would be a poor first
+   * experience, and the default sits in the app's own data directory where
+   * nothing sensitive lives. The confinement is the security property — see
+   * file-transfer.ts — so it must never fall back to "anywhere".
+   */
+  private transferRoot(): string {
+    const configured = (this.db.getAllSettings().transferDir as string) || ''
+    const root = configured || join(app.getPath('userData'), 'transfers')
+    mkdirSync(root, { recursive: true })
+    return root
+  }
+
+  /**
    * The global variables file. It lives in userData beside the database rather
    * than in the install directory so it survives an upgrade and is the user's
    * to edit, back up or keep in sync themselves.
@@ -270,7 +306,18 @@ class SmartcomRevisitedApp {
         this.createWindow()
       }
     })
-    app.on('before-quit', () => {
+    app.on('before-quit', (event) => {
+      // Asked once and then allowed through: `app.quit()` fires this again, and
+      // without the flag the dialog would reappear forever.
+      if (!this.quitConfirmed) {
+        const running = this.sshManager?.listRunningMacros() ?? []
+        if (running.length > 0) {
+          event.preventDefault()
+          void this.confirmQuitWhileRunning(running)
+          return
+        }
+      }
+
       this.assistant?.cancelAll()
       this.windows?.closeAll()
       this.sshManager?.shutdown()
@@ -292,6 +339,72 @@ class SmartcomRevisitedApp {
    * inconvenient. Refusing outright is the only outcome that cannot lose a key
    * the user still needs; deleting the old one stays a deliberate act.
    */
+  /**
+   * Asks before quitting with macros in flight.
+   *
+   * Deliberately specific about what is and is not lost. Quitting kills the
+   * *macro*, not the work it started: a capture running on the far end carries
+   * on quite happily, and what actually disappears is the rest of the script —
+   * the wait, and whatever it was going to do with the result. Saying "a macro
+   * is running" would leave the operator guessing which of those it meant.
+   */
+  private async confirmQuitWhileRunning(running: RunningMacro[]): Promise<void> {
+    const list = running
+      .map((item) => `  • ${item.macroName} — ${item.profileName}`)
+      .join('\n')
+
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Quit anyway', 'Keep running'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+      title: 'Buttons still running',
+      message:
+        running.length === 1
+          ? 'A button is still running.'
+          : `${running.length} buttons are still running.`,
+      detail:
+        `${list}\n\n` +
+        'Quitting stops the remaining steps. Anything already started on the ' +
+        'host keeps running there — a capture will carry on — but the steps ' +
+        'that were going to wait for it, collect files or clean up will not happen.',
+    })
+
+    if (response === 0) {
+      this.quitConfirmed = true
+      app.quit()
+    }
+  }
+
+  /**
+   * Asks for the SecureCRT session folder, starting where it usually lives.
+   *
+   * The default path matters more than it looks: `%APPDATA%\VanDyke\Config\
+   * Sessions` is not somewhere anyone navigates to from memory, and an import
+   * that opens on the desktop is one most people abandon.
+   */
+  private async pickSecureCrtFolder(): Promise<string | null> {
+    const [suggested] = defaultSessionPaths(
+      process.platform,
+      app.getPath('home'),
+      process.env.APPDATA
+    )
+
+    const exists = await stat(suggested)
+      .then(() => true)
+      .catch(() => false)
+
+    const result = await dialog.showOpenDialog(this.mainWindow!, {
+      title: 'Choose the SecureCRT Sessions folder',
+      defaultPath: exists ? suggested : app.getPath('home'),
+      properties: ['openDirectory'],
+      message: 'Usually Config\\Sessions inside the VanDyke folder',
+    })
+
+    return result.canceled || !result.filePaths[0] ? null : result.filePaths[0]
+  }
+
   private assertKeyNameFree(name: string): void {
     const clash = this.db.listSshKeys().find((key) => key.name === name.trim())
     if (clash) {
@@ -395,6 +508,82 @@ class SmartcomRevisitedApp {
             const profile = this.db.getProfile(request.data.id)
             if (!profile) return { success: false, error: 'Profile not found' }
             return { success: true, data: await this.sshManager.testConnection(profile) }
+          }
+
+          case 'profiles:scan-securecrt': {
+            const folder = request.data.folder || (await this.pickSecureCrtFolder())
+            if (!folder) return { success: false, error: 'Import cancelled' }
+
+            const plan = await readSecureCrtStore(folder)
+            return { success: true, data: { folder, ...plan } }
+          }
+
+          case 'profiles:import-securecrt': {
+            const plan = await readSecureCrtStore(request.data.folder)
+
+            // Folders are created first so the connections can point at them,
+            // and reused by name — importing twice must not leave two "Core"
+            // groups with half the hosts in each.
+            const groupIds = new Map<string, string>()
+            for (const group of this.db.listConnectionGroups()) {
+              groupIds.set(group.name, group.id!)
+            }
+
+            let imported = 0
+            const renamed: Array<{ from: string; to: string }> = []
+            const existingNames = new Set(this.db.listProfiles().map((p) => p.name))
+
+            for (const candidate of plan.candidates) {
+              let groupId: string | undefined
+              if (candidate.group) {
+                if (!groupIds.has(candidate.group)) {
+                  const created = this.db.saveConnectionGroup({
+                    name: candidate.group,
+                    sortOrder: 0,
+                  } as never)
+                  groupIds.set(candidate.group, created.id!)
+                }
+                groupId = groupIds.get(candidate.group)
+              }
+
+              // Connection names are unique in the database, so a clash has to
+              // be resolved rather than allowed to fail the whole import.
+              let name = candidate.name
+              if (existingNames.has(name)) {
+                let counter = 2
+                while (existingNames.has(`${candidate.name} (${counter})`)) counter++
+                name = `${candidate.name} (${counter})`
+                renamed.push({ from: candidate.name, to: name })
+              }
+              existingNames.add(name)
+
+              this.db.saveProfile(
+                ProfileSchema.parse({
+                  name,
+                  groupId,
+                  transport: candidate.transport,
+                  host: candidate.host ?? '',
+                  port: candidate.port ?? 22,
+                  // The schema requires a username for SSH; SecureCRT often has
+                  // none because the operator types it at connect time.
+                  username: candidate.username || 'root',
+                  authMethod: 'password',
+                  serialPath: candidate.serialPath,
+                  baudRate: candidate.baudRate ?? 115200,
+                })
+              )
+              imported++
+            }
+
+            return {
+              success: true,
+              data: {
+                imported,
+                renamed,
+                skipped: plan.skipped,
+                unsupported: plan.unsupported,
+              },
+            }
           }
 
           case 'profiles:export-securecrt': {
@@ -580,10 +769,27 @@ class SmartcomRevisitedApp {
           }
 
           case 'sessions:close': {
-            const closed = this.sshManager.closeSession(request.data.sessionId)
-            this.windows.forgetSession(request.data.sessionId)
+            const { sessionId, force } = request.data
+
+            // Closing kills the shell the macro is writing into, so the run
+            // dies with it. Refuse and report rather than asking here: a dialog
+            // raised from the main process would block every window, and the
+            // renderer can say what is being lost in its own words.
+            // Refusal is a result, not an error: the renderer's `invoke` throws
+            // on `success: false` and drops the payload, so reporting it that
+            // way would lose the very detail the warning needs to be specific.
+            const busy = this.sshManager.listRunningMacros().find((m) => m.sessionId === sessionId)
+            if (busy && !force) {
+              return { success: true, data: { closed: false, blockedBy: busy } }
+            }
+
+            const closed = this.sshManager.closeSession(sessionId)
+            this.windows.forgetSession(sessionId)
             return { success: true, data: { closed } }
           }
+
+          case 'macros:running':
+            return { success: true, data: this.sshManager.listRunningMacros() }
 
           case 'sessions:scrollback':
             return {
