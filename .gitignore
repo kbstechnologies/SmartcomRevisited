@@ -120,6 +120,7 @@ Thumbs.db
 # The public mirror is synced with robocopy /MIR, so without these it would keep
 # re-adding them on every sync.
 /ARCHITECTURE.md
+/CLAUDE.md
 /BUILD.md
 /MIGRATIONS.md
 /SECURITY.md
