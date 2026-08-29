@@ -27,8 +27,25 @@ export const ConnectionGroupSchema = z.object({
 
 export type ConnectionGroup = z.infer<typeof ConnectionGroupSchema>
 
-export const TRANSPORTS = ['ssh', 'serial'] as const
+export const TRANSPORTS = ['ssh', 'serial', 'local'] as const
 export type Transport = (typeof TRANSPORTS)[number]
+
+/**
+ * Families of local shell. Drives the icon and the argument defaults; `other`
+ * covers anything the operator typed in by hand.
+ */
+export const LOCAL_SHELL_KINDS = [
+  'cmd',
+  'powershell',
+  'pwsh',
+  'wsl',
+  'bash',
+  'zsh',
+  'fish',
+  'sh',
+  'other',
+] as const
+export type LocalShellKind = (typeof LOCAL_SHELL_KINDS)[number]
 
 export const SERIAL_PARITIES = ['none', 'even', 'odd', 'mark', 'space'] as const
 export const SERIAL_FLOW_CONTROL = ['none', 'rtscts', 'xonxoff'] as const
@@ -40,7 +57,11 @@ export const ProfileSchema = z
   .object({
     id: optionalText,
     name: z.string().min(1),
-    /** Which kind of connection this is. Serial keeps the SmartCOM heritage. */
+    /**
+     * Which kind of connection this is. Serial keeps the SmartCOM heritage;
+     * `local` is a shell on this machine — WSL, PowerShell, cmd, bash, zsh —
+     * run through a pty so it behaves like any other host in the list.
+     */
     transport: z.enum(TRANSPORTS).default('ssh'),
     /** Folder this connection belongs to; ungrouped when absent. */
     groupId: optionalText,
@@ -63,6 +84,20 @@ export const ProfileSchema = z
     stopBits: z.union([z.literal(1), z.literal(2)]).default(1),
     parity: z.enum(SERIAL_PARITIES).default('none'),
     flowControl: z.enum(SERIAL_FLOW_CONTROL).default('none'),
+
+    // --- Local shell ---
+    /** Executable to run, e.g. `C:\Windows\System32\cmd.exe` or `/bin/zsh`. */
+    shellCommand: optionalText,
+    /**
+     * Arguments passed to it, as a list rather than one string: a WSL distro
+     * name or an installation path can contain spaces, and re-splitting a
+     * joined command line would break exactly those cases.
+     */
+    shellArgs: z.array(z.string()).default([]),
+    /** Directory the shell starts in; the user's home when blank. */
+    shellCwd: optionalText,
+    /** Which family this is, for the icon. Cosmetic only. */
+    shellKind: z.enum(LOCAL_SHELL_KINDS).default('other'),
 
     /** Macro run automatically once the session connects. */
     startupMacroId: optionalText,
@@ -107,6 +142,14 @@ export const ProfileSchema = z
           code: z.ZodIssueCode.custom,
           path: ['username'],
           message: 'Username is required',
+        })
+      }
+    } else if (profile.transport === 'local') {
+      if (!profile.shellCommand?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['shellCommand'],
+          message: 'Shell command is required',
         })
       }
     } else if (!profile.serialPath?.trim()) {
@@ -587,6 +630,25 @@ export interface SerialPortInfo {
   friendlyName?: string
   productId?: string
   vendorId?: string
+}
+
+/**
+ * A shell this machine can actually start, as found by the main process.
+ *
+ * The renderer only ever offers what came back from detection, so a connection
+ * cannot be saved pointing at a PowerShell 7 that is not installed. The
+ * command is still editable by hand for anything detection misses.
+ */
+export interface LocalShellInfo {
+  /** Unique on this machine — 'cmd', 'pwsh', 'wsl:Ubuntu-22.04'. */
+  id: string
+  /** What the picker shows, e.g. "WSL — Ubuntu-22.04". */
+  label: string
+  command: string
+  args: string[]
+  kind: LocalShellKind
+  /** True for the machine's login shell, so the form can preselect it. */
+  isDefault?: boolean
 }
 
 export const MacroRunParamsSchema = z.object({

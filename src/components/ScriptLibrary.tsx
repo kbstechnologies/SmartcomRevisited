@@ -46,8 +46,10 @@ export default function ScriptLibrary({ onClose }: { onClose: () => void }) {
   // A Session does not carry its transport, so the profile is what says whether
   // this connection can take a file at all.
   const activeProfile = profiles.find((profile) => profile.id === activeSession?.profileId)
-  const isSerial = activeProfile?.transport === 'serial'
-  const canRun = Boolean(activeSession && selected && !busy && !isSerial)
+  // Copying a file needs SFTP, so this is SSH-only: a serial line has no file
+  // transfer at all, and a local shell already has the file on the same disk.
+  const canCopy = activeProfile ? activeProfile.transport === 'ssh' : true
+  const canRun = Boolean(activeSession && selected && !busy && canCopy)
 
   useEffect(() => {
     void loadScriptLibrary()
@@ -256,9 +258,11 @@ export default function ScriptLibrary({ onClose }: { onClose: () => void }) {
                 </button>
               </div>
 
-              {isSerial && (
+              {!canCopy && (
                 <p className="text-[11px] text-amber-400">
-                  This session is serial — copying a file needs SSH.
+                  {activeProfile?.transport === 'local'
+                    ? 'This session is a local shell — the script is already on this machine, so run it from the terminal.'
+                    : 'This session is serial — copying a file needs SSH.'}
                 </p>
               )}
             </div>

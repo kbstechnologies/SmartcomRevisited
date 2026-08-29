@@ -750,7 +750,7 @@ function StepList({ steps, onChange, macros, macroSets, currentMacroId, depth }:
 
                   <p className="text-[11px] text-gray-500">
                     Copied over SFTP to a random hidden name, then run in this session so you
-                    watch it happen. SSH only — not available on serial.
+                    watch it happen. SSH only — not available on serial or local shells.
                   </p>
                 </>
               )}

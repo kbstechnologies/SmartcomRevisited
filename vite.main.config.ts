@@ -25,6 +25,12 @@ export default defineConfig({
         'ssh2',
         'serialport',
         '@serialport/bindings-cpp',
+        // node-pty finds `pty.node` — and on Windows `conpty.dll`, OpenConsole
+        // and the winpty agent it spawns — by walking up from its own
+        // `__dirname`. Bundled into dist-electron that lookup lands in the
+        // wrong directory and the module fails to load at all, so it has to be
+        // required from node_modules like the other native modules.
+        'node-pty',
         'electron-squirrel-startup',
         'electron-updater',
         ...nodeExternals,

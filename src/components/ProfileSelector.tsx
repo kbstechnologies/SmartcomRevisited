@@ -7,6 +7,7 @@ import {
   FolderIcon,
   ServerIcon,
   CpuChipIcon,
+  CommandLineIcon,
   ArrowUpTrayIcon,
   ArrowDownTrayIcon,
   TrashIcon,
@@ -406,6 +407,8 @@ export default function ProfileSelector({ onClose, onConnected }: ProfileSelecto
                     />
                     {profile.transport === 'serial' ? (
                       <CpuChipIcon className="w-4 h-4 text-amber-400 shrink-0" />
+                    ) : profile.transport === 'local' ? (
+                      <CommandLineIcon className="w-4 h-4 text-emerald-400 shrink-0" />
                     ) : (
                       <ServerIcon className="w-4 h-4 text-blue-400 shrink-0" />
                     )}
@@ -417,6 +420,12 @@ export default function ProfileSelector({ onClose, onConnected }: ProfileSelecto
                             {profile.serialPath} · {profile.baudRate} {profile.dataBits}
                             {profile.parity[0].toUpperCase()}
                             {profile.stopBits}
+                          </>
+                        ) : profile.transport === 'local' ? (
+                          <>
+                            {[profile.shellCommand, ...(profile.shellArgs ?? [])]
+                              .filter(Boolean)
+                              .join(' ')}
                           </>
                         ) : (
                           <>

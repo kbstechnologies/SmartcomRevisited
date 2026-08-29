@@ -397,6 +397,10 @@ export class DatabaseManager {
     ensure('profiles', 'stop_bits', 'INTEGER NOT NULL DEFAULT 1')
     ensure('profiles', 'parity', "TEXT NOT NULL DEFAULT 'none'")
     ensure('profiles', 'flow_control', "TEXT NOT NULL DEFAULT 'none'")
+    ensure('profiles', 'shell_command', 'TEXT')
+    ensure('profiles', 'shell_args', "TEXT NOT NULL DEFAULT '[]'")
+    ensure('profiles', 'shell_cwd', 'TEXT')
+    ensure('profiles', 'shell_kind', "TEXT NOT NULL DEFAULT 'other'")
     // Per-connection button sets. Existing rows default to `[]`, which means
     // "show everything" — an upgrade must not hide buttons someone was using.
     ensure('profiles', 'macro_set_ids', "TEXT NOT NULL DEFAULT '[]'")
@@ -412,6 +416,8 @@ export class DatabaseManager {
     key_path as keyPath, key_id as keyId,
     serial_path as serialPath, baud_rate as baudRate, data_bits as dataBits,
     stop_bits as stopBits, parity, flow_control as flowControl,
+    shell_command as shellCommand, shell_args as shellArgs,
+    shell_cwd as shellCwd, shell_kind as shellKind,
     startup_macro_id as startupMacroId, macro_set_ids as macroSetIds, tags,
     created_at as createdAt, updated_at as updatedAt
   `
@@ -442,10 +448,32 @@ export class DatabaseManager {
     }
   }
 
+  /**
+   * Reads a shell argument list out of its TEXT column.
+   *
+   * Deliberately not `parseStringArray`: that one dedupes, and arguments are
+   * positional — dropping the second `-e` of `-e foo -e bar` would quietly
+   * change what the shell runs.
+   */
+  private static parseArgList(raw: unknown): string[] {
+    if (typeof raw !== 'string' || !raw.trim()) return []
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return []
+      return parsed.filter((item): item is string => typeof item === 'string')
+    } catch {
+      return []
+    }
+  }
+
   private static toProfile(row: Record<string, unknown>): Profile {
     return {
       ...(DatabaseManager.stripNulls(row) as unknown as Profile),
       macroSetIds: DatabaseManager.parseStringArray(row.macroSetIds),
+      // Stored as JSON so a WSL distro name or a path with spaces survives the
+      // round trip; a joined command line would have to be re-split to read.
+      // Unlike macroSetIds this must not dedupe — `-c` twice is legitimate.
+      shellArgs: DatabaseManager.parseArgList(row.shellArgs),
       tags: normaliseTags(DatabaseManager.parseStringArray(row.tags)),
     }
   }
@@ -482,8 +510,9 @@ export class DatabaseManager {
       INSERT OR REPLACE INTO profiles
         (id, name, transport, group_id, host, port, username, auth_method,
          key_path, key_id, serial_path, baud_rate, data_bits, stop_bits,
-         parity, flow_control, startup_macro_id, macro_set_ids, tags)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         parity, flow_control, shell_command, shell_args, shell_cwd, shell_kind,
+         startup_macro_id, macro_set_ids, tags)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       profile.name,
@@ -501,6 +530,10 @@ export class DatabaseManager {
       profile.stopBits,
       profile.parity,
       profile.flowControl,
+      profile.shellCommand ?? null,
+      JSON.stringify(profile.shellArgs ?? []),
+      profile.shellCwd ?? null,
+      profile.shellKind ?? 'other',
       profile.startupMacroId ?? null,
       // Sets that have since been deleted are dropped on the way in, so a
       // stale id cannot sit in the row forever and silently come back to life
@@ -1029,9 +1062,13 @@ export class DatabaseManager {
     const profile = this.getProfile(profileId)
     if (!profile) return null
 
-    return profile.transport === 'serial'
-      ? `${profile.name} (${profile.serialPath})`
-      : `${profile.name} (${profile.username}@${profile.host}:${profile.port})`
+    if (profile.transport === 'serial') return `${profile.name} (${profile.serialPath})`
+    if (profile.transport === 'local') {
+      return `${profile.name} (local: ${[profile.shellCommand, ...(profile.shellArgs ?? [])]
+        .filter(Boolean)
+        .join(' ')})`
+    }
+    return `${profile.name} (${profile.username}@${profile.host}:${profile.port})`
   }
 
   queryLogs(filter: LogFilter): AuditLog[] {

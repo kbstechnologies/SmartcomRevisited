@@ -10,6 +10,7 @@ import {
   COMMON_BAUD_RATES,
   SERIAL_FLOW_CONTROL,
   SERIAL_PARITIES,
+  type LocalShellInfo,
   type Profile,
   type SerialPortInfo,
   type Transport,
@@ -43,6 +44,10 @@ const blankForm = (): FormState => ({
   stopBits: 1,
   parity: 'none',
   flowControl: 'none',
+  shellCommand: undefined,
+  shellArgs: [],
+  shellCwd: undefined,
+  shellKind: 'other',
   startupMacroId: undefined,
   macroSetIds: [],
   tags: [],
@@ -62,6 +67,7 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
   const loadSshKeys = useStore((state) => state.loadSshKeys)
   const loadConnectionGroups = useStore((state) => state.loadConnectionGroups)
   const listSerialPorts = useStore((state) => state.listSerialPorts)
+  const listLocalShells = useStore((state) => state.listLocalShells)
 
   const [form, setForm] = useState<FormState>(() =>
     profile ? { ...blankForm(), ...profile, password: '', passphrase: '' } : blankForm()
@@ -70,6 +76,8 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
   const [serialPorts, setSerialPorts] = useState<SerialPortInfo[]>([])
   const [portsError, setPortsError] = useState<string | null>(null)
   const [scanning, setScanning] = useState(false)
+  const [localShells, setLocalShells] = useState<LocalShellInfo[]>([])
+  const [shellsError, setShellsError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -91,11 +99,45 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
     }
   }
 
-  // Populate the port list as soon as serial is selected.
+  const scanShells = async () => {
+    setScanning(true)
+    setShellsError(null)
+    try {
+      setLocalShells(await listLocalShells())
+    } catch (scanError) {
+      setShellsError(scanError instanceof Error ? scanError.message : 'Could not list shells')
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  // Populate the port or shell list as soon as that transport is selected.
   useEffect(() => {
     if (form.transport === 'serial') void scanPorts()
+    if (form.transport === 'local') void scanShells()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.transport])
+
+  /**
+   * Fills in the command, arguments and kind from a detected shell in one go.
+   *
+   * The name is only auto-filled while it is blank or still matches the shell
+   * that was picked before — retyping the name and then switching distro must
+   * not silently throw the operator's name away.
+   */
+  const applyShell = (shell: LocalShellInfo) => {
+    setForm((current) => {
+      const previous = localShells.find((candidate) => candidate.command === current.shellCommand)
+      const keepName = current.name.trim() && current.name !== previous?.label
+      return {
+        ...current,
+        shellCommand: shell.command,
+        shellArgs: [...shell.args],
+        shellKind: shell.kind,
+        name: keepName ? current.name : shell.label,
+      }
+    })
+  }
 
   const update = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((current) => ({ ...current, [key]: value }))
@@ -134,6 +176,14 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
   const labelClass = 'block text-xs font-medium text-gray-300 mb-1'
 
   const isSerial = form.transport === 'serial'
+  const isLocal = form.transport === 'local'
+  // Which detected shell, if any, the current command matches — used to keep
+  // the dropdown in sync when the command is edited by hand.
+  const matchedShell = localShells.find(
+    (shell) =>
+      shell.command === form.shellCommand &&
+      shell.args.join('\u0000') === (form.shellArgs ?? []).join('\u0000')
+  )
 
   const startupOptions = useMemo(() => {
     const setName = new Map(macroSets.map((set) => [set.id, set.name]))
@@ -200,7 +250,7 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
           {/* Transport picker */}
           <div className="flex rounded overflow-hidden border border-gray-600">
-            {(['ssh', 'serial'] as Transport[]).map((transport) => (
+            {(['ssh', 'serial', 'local'] as Transport[]).map((transport) => (
               <button
                 key={transport}
                 onClick={() => update('transport', transport)}
@@ -211,7 +261,11 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
                     : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
                 )}
               >
-                {transport === 'ssh' ? 'SSH' : 'Serial / COM'}
+                {transport === 'ssh'
+                  ? 'SSH'
+                  : transport === 'serial'
+                    ? 'Serial / COM'
+                    : 'Local shell'}
               </button>
             ))}
           </div>
@@ -222,7 +276,9 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
               <input
                 value={form.name}
                 onChange={(event) => update('name', event.target.value)}
-                placeholder={isSerial ? 'Console cable' : 'Production web 01'}
+                placeholder={
+                  isSerial ? 'Console cable' : isLocal ? 'PowerShell' : 'Production web 01'
+                }
                 className={inputClass}
               />
             </div>
@@ -243,7 +299,89 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
             </div>
           </div>
 
-          {isSerial ? (
+          {isLocal ? (
+            <>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium text-gray-300">Shell</span>
+                  <button
+                    onClick={scanShells}
+                    disabled={scanning}
+                    className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-200 disabled:opacity-50"
+                  >
+                    <ArrowPathIcon className={clsx('w-3 h-3', scanning && 'animate-spin')} />
+                    Rescan
+                  </button>
+                </div>
+                <select
+                  value={matchedShell?.id ?? ''}
+                  onChange={(event) => {
+                    const shell = localShells.find(
+                      (candidate) => candidate.id === event.target.value
+                    )
+                    if (shell) applyShell(shell)
+                  }}
+                  className={inputClass}
+                >
+                  <option value="">
+                    {localShells.length === 0
+                      ? '— no shells detected —'
+                      : form.shellCommand
+                        ? '— custom command —'
+                        : '— choose a shell —'}
+                  </option>
+                  {localShells.map((shell) => (
+                    <option key={shell.id} value={shell.id}>
+                      {shell.label}
+                    </option>
+                  ))}
+                </select>
+                {shellsError && <p className="mt-1 text-[11px] text-amber-400">{shellsError}</p>}
+              </div>
+
+              {/* Typed entry too, for anything detection misses. */}
+              <div>
+                <label className={labelClass}>Command</label>
+                <input
+                  value={form.shellCommand ?? ''}
+                  onChange={(event) =>
+                    update('shellCommand', event.target.value || undefined)
+                  }
+                  placeholder="C:\Windows\System32\cmd.exe or /bin/zsh"
+                  className={`${inputClass} font-mono`}
+                />
+              </div>
+
+              <div>
+                <label className={labelClass}>Arguments</label>
+                <input
+                  value={(form.shellArgs ?? []).join(' ')}
+                  onChange={(event) =>
+                    update(
+                      'shellArgs',
+                      event.target.value.split(/\s+/).filter(Boolean)
+                    )
+                  }
+                  placeholder="-d Ubuntu-22.04"
+                  className={`${inputClass} font-mono`}
+                />
+                <p className="mt-1 text-[11px] text-gray-500">
+                  Split on spaces. Pick a shell above for anything that needs an argument
+                  containing one.
+                </p>
+              </div>
+
+              <div>
+                <label className={labelClass}>Start in</label>
+                <input
+                  value={form.shellCwd ?? ''}
+                  onChange={(event) => update('shellCwd', event.target.value || undefined)}
+                  placeholder="— your home directory —"
+                  className={`${inputClass} font-mono`}
+                />
+              </div>
+            </>
+          ) : isSerial ? (
             <>
               <div>
                 <div className="flex items-center justify-between mb-1">
@@ -609,7 +747,13 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
           <button
             onClick={handleTest}
             disabled={isSerial}
-            title={isSerial ? 'A serial port is tested by opening it' : undefined}
+            title={
+              isSerial
+                ? 'A serial port is tested by opening it'
+                : isLocal
+                  ? 'Checks that the shell is still installed where this connection points'
+                  : undefined
+            }
             className="px-3 py-1.5 text-sm rounded border border-gray-600 text-gray-300 hover:bg-gray-700 disabled:opacity-40"
           >
             Test connection

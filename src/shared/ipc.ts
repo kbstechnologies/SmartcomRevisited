@@ -42,6 +42,9 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
   // Serial
   z.object({ channel: z.literal('serial:list-ports'), data: z.any().optional() }),
 
+  // Local shells
+  z.object({ channel: z.literal('local:list-shells'), data: z.any().optional() }),
+
   // Sessions
   z.object({ channel: z.literal('sessions:list'), data: z.any().optional() }),
   z.object({ channel: z.literal('sessions:open'), data: z.object({ profileId: z.string() }) }),

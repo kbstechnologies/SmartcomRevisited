@@ -119,7 +119,11 @@ export default function HostMultiSelect({ profiles, selected, onChange, hasSessi
                 <span className="block truncate text-[10px] text-gray-500">
                   {profile.transport === 'serial'
                     ? profile.serialPath
-                    : `${profile.username}@${profile.host}:${profile.port}`}
+                    : profile.transport === 'local'
+                      ? [profile.shellCommand, ...(profile.shellArgs ?? [])]
+                          .filter(Boolean)
+                          .join(' ')
+                      : `${profile.username}@${profile.host}:${profile.port}`}
                 </span>
               </span>
               {live && (

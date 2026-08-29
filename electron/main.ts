@@ -6,6 +6,7 @@ import { stat } from 'fs/promises'
 import { keytar, getKeychainManager } from './keychain'
 import { DatabaseManager } from './database'
 import { SSHManager, buildScriptCommand, type RunningMacro } from './ssh-manager'
+import { detectLocalShells } from './local-shells'
 import { listLibrary, readScript } from './script-library'
 import {
   ensureGlobalsFile,
@@ -719,6 +720,20 @@ class SmartcomRevisitedApp {
               return {
                 success: false,
                 error: `Could not enumerate serial ports: ${
+                  error instanceof Error ? error.message : error
+                }`,
+              }
+            }
+          }
+
+          // ----------------------------------------------------- local shells
+          case 'local:list-shells': {
+            try {
+              return { success: true, data: await detectLocalShells() }
+            } catch (error) {
+              return {
+                success: false,
+                error: `Could not list local shells: ${
                   error instanceof Error ? error.message : error
                 }`,
               }

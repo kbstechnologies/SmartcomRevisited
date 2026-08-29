@@ -16,6 +16,7 @@ import {
   resolveInTransferDir,
   uniqueLocalPath,
 } from './file-transfer'
+import { checkLocalShell, localShellEnv } from './local-shells'
 
 // Simple UUID v4 generator
 const uuidv4 = (): string => {
@@ -154,6 +155,8 @@ export interface SSHSession extends EventEmitter {
   shell?: any
   /** Present only on serial sessions. */
   serialPort?: { close: (cb?: (e?: Error | null) => void) => void }
+  /** Present only on local-shell sessions. */
+  pty?: { kill: () => void }
   log?: SessionLog
 }
 
@@ -342,8 +345,12 @@ export class SSHManager extends EventEmitter {
    * operator least expects.
    */
   private openSftp(session: SSHSession): Promise<any> {
-    if (session.profile.transport === 'serial') {
-      throw new Error('File transfer needs SSH. This connection is a serial port.')
+    if (session.profile.transport !== 'ssh') {
+      throw new Error(
+        session.profile.transport === 'local'
+          ? 'File transfer needs SSH. This connection is a local shell — copy the file yourself.'
+          : 'File transfer needs SSH. This connection is a serial port.'
+      )
     }
 
     return new Promise((resolve, reject) => {
@@ -517,8 +524,12 @@ export class SSHManager extends EventEmitter {
   ): Promise<{ remotePath: string; name: string }> {
     const session = this.sessions.get(sessionId)
     if (!session) throw new Error('Session not found')
-    if (session.profile.transport === 'serial') {
-      throw new Error('Scripts can only be copied over SSH — this is a serial connection')
+    if (session.profile.transport !== 'ssh') {
+      throw new Error(
+        session.profile.transport === 'local'
+          ? 'Scripts can only be copied over SSH — this is a local shell, so run the file directly'
+          : 'Scripts can only be copied over SSH — this is a serial connection'
+      )
     }
     if (!this.scriptProvider) throw new Error('Script library is not configured')
 
@@ -543,9 +554,132 @@ export class SSHManager extends EventEmitter {
 
   /** Routes to the right transport. Everything downstream is identical. */
   async createSession(profile: Profile, options: { autoLog?: boolean } = {}): Promise<string> {
-    return profile.transport === 'serial'
-      ? this.createSerialSession(profile, options)
-      : this.createSshSession(profile, options)
+    if (profile.transport === 'serial') return this.createSerialSession(profile, options)
+    if (profile.transport === 'local') return this.createLocalSession(profile, options)
+    return this.createSshSession(profile, options)
+  }
+
+  /**
+   * Starts a shell on this machine — WSL, PowerShell, cmd, bash, zsh.
+   *
+   * Like the serial path, this only has to present `session.shell` and the
+   * `output` event; the macro engine, `expect`, session logging and the
+   * assistant all work off those and need to know nothing about ptys. Unlike
+   * serial, a pty *does* have a window size, so `setWindow` is real here and
+   * full-screen programs resize with the pane.
+   */
+  private async createLocalSession(
+    profile: Profile,
+    options: { autoLog?: boolean } = {}
+  ): Promise<string> {
+    const sessionId = uuidv4()
+
+    const session: SSHSession = Object.assign(new EventEmitter(), {
+      id: sessionId,
+      profile,
+      client: null as unknown as Client,
+      status: 'connecting' as const,
+      lastActivity: new Date(),
+      createdAt: new Date(),
+      transcript: '',
+      scrollback: '',
+      bracketedPaste: false,
+      modeScanCarry: '',
+    })
+
+    this.sessions.set(sessionId, session)
+
+    try {
+      // Imported lazily, as serialport is, so a machine whose native module
+      // failed to load still fails on the one connection that needs it
+      // rather than with a main process that will not start at all.
+      const { spawn } = await import('node-pty')
+      const { homedir } = await import('os')
+
+      // Start at the size the pane already reported. Opening at 80x24 and
+      // waiting for a resize is what left nano drawing into a corner of the
+      // pane on SSH, and a pty here has exactly the same problem.
+      const { cols, rows } = session.pendingSize ?? { cols: 80, rows: 24 }
+      const cwd = profile.shellCwd?.trim() || homedir()
+
+      const term = spawn(profile.shellCommand!, profile.shellArgs ?? [], {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        cwd,
+        env: localShellEnv(),
+      })
+
+      session.pty = term
+      session.shell = {
+        write: (text: string) => term.write(text),
+        setWindow: (nextRows: number, nextCols: number) => {
+          // A pane can report a zero dimension for one frame while it is
+          // being laid out, and ConPTY throws on a zero-sized resize.
+          if (nextCols > 0 && nextRows > 0) term.resize(nextCols, nextRows)
+        },
+        close: () => term.kill(),
+      }
+
+      term.onData((data: string) => {
+        session.lastActivity = new Date()
+        session.emit('output', data)
+        this.recordTranscript(session, data)
+        this.writeSessionLog(session, data)
+        this.emit('session-data', sessionId, data)
+      })
+
+      term.onExit(({ exitCode, signal }) => {
+        // The shell exiting is the normal way a local session ends — the
+        // operator typed `exit`. Reporting the code is what separates that
+        // from a shell that died on startup, where the pane would otherwise
+        // just go quiet with no explanation.
+        const detail = [
+          exitCode ? ` with code ${exitCode}` : '',
+          signal ? ` (signal ${signal})` : '',
+        ].join('')
+        this.emit(
+          'session-data',
+          sessionId,
+          `\r\n\x1b[90m[${profile.name} exited${detail}]\x1b[0m\r\n`
+        )
+        session.status = 'disconnected'
+        this.emit('session-status', sessionId, 'disconnected')
+        this.cleanup(sessionId)
+      })
+
+      session.status = 'connected'
+      session.lastActivity = new Date()
+      this.emit('session-status', sessionId, 'connected')
+
+      // The pane may have been resized again while the pty was starting.
+      if (session.pendingSize) {
+        const latest = session.pendingSize
+        if (latest.cols !== cols || latest.rows !== rows) {
+          session.shell.setWindow(latest.rows, latest.cols, 0, 0)
+        }
+      }
+
+      if (options.autoLog) {
+        try {
+          this.startLogging(sessionId)
+        } catch (logError) {
+          this.emit('session-data', sessionId, `\r\n[log] failed to start: ${logError}\r\n`)
+        }
+      }
+
+      this.emit('session-ready', sessionId)
+    } catch (error) {
+      session.status = 'error'
+      session.error =
+        error instanceof Error
+          ? `Could not start ${profile.shellCommand}: ${error.message}`
+          : 'Unknown error'
+      this.emit('session-status', sessionId, 'error', session.error)
+      this.cleanup(sessionId)
+    }
+
+    return sessionId
   }
 
   /**
@@ -818,8 +952,8 @@ export class SSHManager extends EventEmitter {
   private startKeepalive(sessionId: string) {
     const session = this.sessions.get(sessionId)
     if (!session || session.status !== 'connected') return
-    // Nothing to keep alive on a serial line.
-    if (session.profile.transport === 'serial') return
+    // Nothing to keep alive on a serial line or a shell on this machine.
+    if (session.profile.transport !== 'ssh') return
 
     const interval = setInterval(() => {
       const current = this.sessions.get(sessionId)
@@ -842,6 +976,8 @@ export class SSHManager extends EventEmitter {
 
     if (session.serialPort) {
       session.serialPort.close(() => undefined)
+    } else if (session.pty) {
+      session.pty.kill()
     } else {
       session.client?.end()
     }
@@ -1747,6 +1883,13 @@ export class SSHManager extends EventEmitter {
   // ---------------------------------------------------------------------------
 
   async testConnection(profile: Profile): Promise<{ success: boolean; error?: string }> {
+    // A local shell has nothing to connect to, so the useful test is that the
+    // executable is still where the connection says it is — which is exactly
+    // what breaks when PowerShell 7 is uninstalled or a WSL distro removed.
+    if (profile.transport === 'local') {
+      return checkLocalShell(profile.shellCommand ?? '', profile.shellCwd ?? undefined)
+    }
+
     const client = new Client()
 
     let settled = false

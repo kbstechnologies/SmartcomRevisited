@@ -8,8 +8,16 @@ one-click session logging, and managed SSH keys.
 ## Features
 
 ### Sessions and layout
-- Multiple concurrent SSH **and serial** sessions — a serial port behaves like any
-  other session, so buttons, forms, logging and `wait for prompt` all work on it
+- Multiple concurrent SSH, **serial** and **local shell** sessions — every
+  transport behaves like any other session, so buttons, forms, logging and
+  `wait for prompt` all work on all of them
+- **Local shells as connections**: WSL (one entry per installed distro),
+  Windows PowerShell, PowerShell 7, Command Prompt and Git Bash on Windows;
+  your login shell plus anything in `/etc/shells` on Linux and macOS. The app
+  detects what is installed and offers it, and each one is saved as an ordinary
+  connection — so it sits in a group, carries tags and button sets, and opens
+  alongside remote hosts in the grid. Runs through a real pty, so `vim`, `top`
+  and `less` work and resize with the pane
 - Connections can be organised into **groups**, and exported/imported as JSON
   (secrets are deliberately left out of the export)
 - Hosts can be edited and **deleted** — one at a time or every ticked host at

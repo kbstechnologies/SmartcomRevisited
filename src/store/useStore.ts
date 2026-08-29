@@ -15,6 +15,7 @@ import type {
   FormField,
   ConnectionGroup,
   SerialPortInfo,
+  LocalShellInfo,
   ScriptEntry,
 } from '@shared/types'
 import type { AiSettings, AiAsk, AiStreamEvent, AssistantTurn } from '@shared/ai'
@@ -225,6 +226,7 @@ interface AppStore {
   deleteConnectionGroup: (id: string) => Promise<boolean>
 
   listSerialPorts: () => Promise<SerialPortInfo[]>
+  listLocalShells: () => Promise<LocalShellInfo[]>
 
   loadSessions: () => Promise<void>
   openSession: (profileId: string) => Promise<string>
@@ -591,6 +593,7 @@ const useStore = create<AppStore>((set, get) => ({
   },
 
   listSerialPorts: async () => invoke<SerialPortInfo[]>('serial:list-ports'),
+  listLocalShells: async () => invoke<LocalShellInfo[]>('local:list-shells'),
 
   loadSessions: async () => {
     const sessions = await invoke<Session[]>('sessions:list')

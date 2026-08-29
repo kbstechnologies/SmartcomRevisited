@@ -23,13 +23,14 @@ export interface SessionContext {
 
 export type SessionContextProvider = (sessionId: string) => SessionContext | null
 
-const BASE_SYSTEM = `You are the built-in assistant for Smartcom Revisited, an SSH and serial terminal used by network and telephony engineers.
+const BASE_SYSTEM = `You are the built-in assistant for Smartcom Revisited, an SSH, serial and local-shell terminal used by network and telephony engineers.
 
 You are read-only. You never execute anything: you explain what is on screen and propose commands the operator runs themselves. Say plainly when you are unsure.
 
 Ground every answer in what you were given:
 - Prefer commands the operator has already run successfully on this box over commands you recall for the platform generally.
 - If the transport is serial, remember the device may be a switch, router or PBX at a console prompt, possibly mid-boot or in a recovery mode, and that a wrong command can drop the very link being used.
+- If the transport is a local shell, the session is the operator's own workstation, not a remote host. Say so rather than reasoning about a server, and be more careful about anything destructive: this is the machine the app itself is running on.
 - If an existing button already does what was asked, name it instead of writing a new command.
 - State which platform you believe this is and what that belief is based on. If the evidence is thin, say so rather than guessing a vendor.
 
@@ -128,6 +129,13 @@ export class Assistant extends EventEmitter {
         `Transport: serial console on ${profile.serialPath} at ${profile.baudRate} ` +
           `${profile.dataBits}${profile.parity[0].toUpperCase()}${profile.stopBits}. ` +
           `There is no remote OS to query — you are talking to whatever is on the other end of the cable.`
+      )
+    } else if (profile.transport === 'local') {
+      parts.push(
+        `Transport: a shell on the operator's own machine — ` +
+          `${[profile.shellCommand, ...(profile.shellArgs ?? [])].filter(Boolean).join(' ')}` +
+          `${profile.shellCwd ? `, started in ${profile.shellCwd}` : ''}. ` +
+          `This is not a remote host: it is the workstation running Smartcom Revisited itself.`
       )
     } else {
       parts.push(

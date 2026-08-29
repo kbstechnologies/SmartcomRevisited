@@ -115,6 +115,19 @@ export function toSecureCrtCsv(
       continue
     }
 
+    if (profile.transport === 'local') {
+      // SecureCRT's text importer only creates network sessions, and there is
+      // nothing sensible to point one at: a shell on this machine is not
+      // reachable from the machine doing the importing.
+      unsupported.push({
+        name: profile.name,
+        reason:
+          `Local shell (${profile.shellCommand || 'no command set'}). It runs on this machine, ` +
+          'so there is no session for SecureCRT to open. Recreate it as a local shell there.',
+      })
+      continue
+    }
+
     if (!profile.host?.trim()) {
       skipped.push({ name: profile.name, reason: 'No hostname or IP address set' })
       continue
