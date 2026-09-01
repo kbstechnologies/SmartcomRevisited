@@ -3,6 +3,7 @@ import { useHotkeys } from 'react-hotkeys-hook'
 import { useStore } from './store/useStore'
 import Layout from './components/Layout'
 import CommandPalette from './components/CommandPalette'
+import TldrCommandCenter from './components/TldrCommandCenter'
 import VariableForm from './components/VariableForm'
 import ConfirmStep from './components/ConfirmStep'
 import { startSessionStream } from './lib/sessionStream'
@@ -15,11 +16,35 @@ function App() {
   const submitMacroForm = useStore((state) => state.submitMacroForm)
   const pendingConfirm = useStore((state) => state.pendingConfirm)
   const submitMacroConfirm = useStore((state) => state.submitMacroConfirm)
+  const tldrSearchOpen = useStore((state) => state.tldrSearchOpen)
+  const setTldrSearchOpen = useStore((state) => state.setTldrSearchOpen)
+  // A detached window shows terminals only. Its results would open a panel
+  // that window does not render, so the search does not open there either.
+  const isDetached = useStore((state) => state.isDetachedWindow)
 
   useHotkeys('cmd+k,ctrl+k', (event) => {
     event.preventDefault()
     setCommandPaletteOpen(!isCommandPaletteOpen)
   })
+
+  /**
+   * The tldr Command Center. Ctrl+Shift+T was free: Ctrl+K is the command
+   * palette, and the terminal's own bindings are Ctrl+Shift+C / Ctrl+Shift+V.
+   *
+   * `enableOnFormTags` because xterm puts a hidden textarea under the cursor,
+   * so without it the shortcut would be dead in the one place it is for. The
+   * terminal also handles this key itself — see `attachCustomKeyEventHandler`
+   * in Terminal.tsx — since a focused terminal never lets the key reach here.
+   */
+  useHotkeys(
+    'cmd+shift+t,ctrl+shift+t',
+    (event) => {
+      event.preventDefault()
+      if (isDetached) return
+      setTldrSearchOpen(!tldrSearchOpen)
+    },
+    { enableOnFormTags: true }
+  )
 
   // A detached window is opened with ?mode=detached and the sessions it owns.
   useEffect(() => {
@@ -49,6 +74,7 @@ function App() {
       refreshLogStatus,
       loadSessionPlacement,
       loadGlobalVars,
+      loadTldrStatus,
     } = useStore.getState()
 
     void Promise.allSettled([
@@ -69,6 +95,10 @@ function App() {
       // A window that opens or reloads while a macro is running would otherwise
       // show no busy indicator until the run happened to end.
       useStore.getState().loadRunningMacros(),
+      // Whether tldr has a usable cache. `allSettled`, so a main process
+      // without the service — an older build, a service that failed to
+      // construct — leaves the chip inert rather than breaking start-up.
+      loadTldrStatus(),
     ])
   }, [])
 
@@ -110,6 +140,16 @@ function App() {
     const onPlacement = ({ placement }: { placement: Record<string, number> }) =>
       useStore.getState().setSessionPlacement(placement)
 
+    // The tldr cache downloads and indexes long after start-up, so the chip has
+    // to learn it went from "unavailable" to "ready" without being asked.
+    const onTldrStatus = ({ status }: { status: any }) =>
+      useStore.getState().setTldrStatus({
+        ...status,
+        // The push does not carry a disk measurement; keep the last one rather
+        // than blanking the size in an open settings screen.
+        cacheBytes: useStore.getState().tldrStatus?.cacheBytes ?? 0,
+      })
+
     window.electronAPI.on('session-log-changed', onLogChanged)
     window.electronAPI.on('macro-progress', onProgress)
     window.electronAPI.on('macro-running-changed', onRunningChanged)
@@ -118,6 +158,7 @@ function App() {
     window.electronAPI.on('session-status-changed', onStatus)
     window.electronAPI.on('active-session-changed', onActiveSession)
     window.electronAPI.on('session-placement-changed', onPlacement)
+    window.electronAPI.on('tldr-status', onTldrStatus)
 
     return () => {
       window.electronAPI.off('session-log-changed', onLogChanged)
@@ -128,6 +169,7 @@ function App() {
       window.electronAPI.off('session-status-changed', onStatus)
       window.electronAPI.off('active-session-changed', onActiveSession)
       window.electronAPI.off('session-placement-changed', onPlacement)
+      window.electronAPI.off('tldr-status', onTldrStatus)
     }
   }, [])
 
@@ -140,6 +182,12 @@ function App() {
           isOpen={isCommandPaletteOpen}
           onClose={() => setCommandPaletteOpen(false)}
         />
+      )}
+
+      {/* Searchable tldr, opened from the chip, the panel header or
+          Ctrl+Shift+T. A result opens in the side panel, not here. */}
+      {tldrSearchOpen && !isDetached && (
+        <TldrCommandCenter onClose={() => setTldrSearchOpen(false)} />
       )}
 
       {/* An `Ask for input` block reached mid-script */}

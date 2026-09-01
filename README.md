@@ -34,10 +34,16 @@ one-click session logging, and managed SSH keys.
 - Panes stay mounted, so scrollback survives switching layouts
 - The side panel **drags wider or narrower** and remembers the width; double-click
   the divider to reset it
-- **PuTTY mouse habits**: drag to select, **right-click to copy** the selection,
-  and right-click with nothing selected to **paste**. `Ctrl`+`Shift`+`C` and
-  `Ctrl`+`Shift`+`V` do the same from the keyboard — plain `Ctrl`+`C` stays as
-  interrupt, where it belongs
+- **PuTTY mouse habits**: **highlighting copies** — release the mouse over a
+  selection and it is on the clipboard, no copy step. Right-click with nothing
+  selected **pastes**; right-click with a selection copies it too.
+  `Ctrl`+`Shift`+`C` and `Ctrl`+`Shift`+`V` do the same from the keyboard —
+  plain `Ctrl`+`C` stays as interrupt, where it belongs. Copy-on-select can be
+  turned off in Settings › Terminal
+- A **scratch pad** in the side panel: somewhere to park text between two
+  terminals. Not a notepad — there is no file and nothing survives closing the
+  app, which is deliberate given what tends to get parked while working on a
+  live box
 - **Pop a terminal out** into its own window for a second monitor. The button
   panel stays in the main window and still targets whichever pane has focus, in
   any window; each window keeps its own view and its own scrollback
@@ -100,6 +106,28 @@ need here?". Backed by Claude, OpenAI or a local Ollama model, switchable at
 runtime. It is read-only by design: it proposes commands and you decide whether
 to send them. Bring your own API key; keys live in the same OS keystore as SSH
 secrets, and secrets in the session text are redacted before anything is sent.
+
+### tldr command intelligence
+Type a command into any session and Smartcom works out what you are actually
+running — `sudo -u root tcpdump -i eth0` is a `tcpdump` question — and offers
+the matching [tldr](https://github.com/tldr-pages/tldr) page in the side panel.
+
+Each example becomes a small command builder: `{{interface}}` turns into a
+field, the generated command is shown as it will be sent, and you can **Copy**,
+**Insert** it onto the command line without running it, **Run** it against the
+session named at the top of the panel, or hand it to the AI assistant. Anything
+that looks destructive becomes **Review & Run** and is refused by the main
+process until you have seen it and agreed.
+
+`Ctrl`/`Cmd`+`Shift`+`T` opens a searchable Command Center over all ~7,400
+pages — by command, by description, or by what you are trying to do ("restart
+service", "find large files"). Pages are cached locally on first run, work
+offline afterwards, refresh themselves weekly, and pick the variant that suits
+the session: Windows pages for a PowerShell session, Cisco IOS pages for a
+connection tagged `cisco`.
+
+There is nothing to install and no `tldr` client needed. See
+[docs/TLDR_INTEGRATION.md](docs/TLDR_INTEGRATION.md).
 
 ### Other
 - Per-profile **startup script** that runs once the shell is ready
@@ -241,11 +269,14 @@ electron/           main process
   window-manager.ts main window plus popped-out terminal windows
   updater.ts        release checks, and what each install kind may do about them
   ai/               assistant providers and prompt assembly
+  tldr/             tldr page cache, downloader, index and lookup service
 src/
   components/       React UI (ScriptBuilder is the block editor)
-  lib/              session output buffer, pane selection, icon map
+  lib/              session output buffer, typed-line model, pane selection, icons
   shared/           zod types + IPC contract shared by both processes
   store/            zustand store
+docs/
+  TLDR_INTEGRATION.md   the tldr feature end to end
 ```
 
 ## Testing

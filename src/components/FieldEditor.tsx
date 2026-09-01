@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 import { PlusIcon, TrashIcon } from '@heroicons/react/24/outline'
 import type { FormField } from '@shared/types'
 
@@ -28,11 +30,23 @@ export const makeField = (index: number): FormField => ({
 
 /** Builds the input list for a popup form; each field becomes a `{{VAR}}`. */
 export default function FieldEditor({ fields, onChange, emptyHint }: FieldEditorProps) {
+  /**
+   * Raw text of the choices box while it is being edited, and which row it
+   * belongs to. Cleared on blur so the field settles back to the canonical
+   * `a, b, c` rendering of what was actually stored.
+   */
+  const [optionsDraft, setOptionsDraft] = useState<{ index: number; text: string } | null>(null)
+
   const update = (index: number, patch: Partial<FormField>) => {
     onChange(fields.map((field, i) => (i === index ? { ...field, ...patch } : field)))
   }
 
-  const remove = (index: number) => onChange(fields.filter((_, i) => i !== index))
+  const remove = (index: number) => {
+    // Indices shift when a row goes, so a draft pointing at one is now aimed
+    // at a different field.
+    setOptionsDraft(null)
+    onChange(fields.filter((_, i) => i !== index))
+  }
 
   const inputClass =
     'px-2 py-1 rounded bg-gray-800 border border-gray-600 text-xs text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500'
@@ -91,15 +105,27 @@ export default function FieldEditor({ fields, onChange, emptyHint }: FieldEditor
             />
             {field.type === 'select' ? (
               <input
-                value={field.options.join(', ')}
-                onChange={(event) =>
+                value={
+                  optionsDraft?.index === index
+                    ? optionsDraft.text
+                    : field.options.join(', ')
+                }
+                onChange={(event) => {
+                  // The text being typed is held here, not derived back from
+                  // `options`. Round-tripping through the array ate the comma
+                  // on the keystroke that added it — "a," parses to ["a"],
+                  // which renders as "a" — so a second choice could never be
+                  // typed. Parsed value still goes up on every keystroke; only
+                  // what is displayed comes from the draft.
+                  setOptionsDraft({ index, text: event.target.value })
                   update(index, {
                     options: event.target.value
                       .split(',')
                       .map((option) => option.trim())
                       .filter(Boolean),
                   })
-                }
+                }}
+                onBlur={() => setOptionsDraft(null)}
                 placeholder="Choices, comma separated"
                 className={`${inputClass} flex-1`}
               />

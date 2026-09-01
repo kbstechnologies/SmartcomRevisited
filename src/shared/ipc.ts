@@ -95,8 +95,10 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
     channel: z.literal('sessions:paste'),
     data: z.object({ sessionId: z.string(), text: z.string() }),
   }),
-  // The assistant's Insert button, and nothing else. Distinct from
-  // `sessions:paste` because it refuses anything that would run itself — see
+  // The Insert buttons — the assistant panel's and the tldr panel's — and
+  // nothing else. Distinct from `sessions:paste` because it refuses anything
+  // that would run itself: it strips trailing newlines and declines multi-line
+  // text on a remote that cannot tell a paste from typing. See
   // src/shared/assistant-contract.ts.
   z.object({
     channel: z.literal('sessions:insert-suggestion'),
@@ -281,6 +283,56 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
   z.object({ channel: z.literal('ai:key-status'), data: z.any().optional() }),
   z.object({ channel: z.literal('ai:list-models'), data: z.any().optional() }),
 
+  // tldr command intelligence.
+  //
+  // Reads are cheap and index-only; `tldr:run` is the one channel here that
+  // acts, and it is gated in the main process rather than only in the panel —
+  // see the case in main.ts.
+  z.object({ channel: z.literal('tldr:status'), data: z.any().optional() }),
+  z.object({
+    channel: z.literal('tldr:lookup'),
+    data: z.object({ command: z.string(), platform: z.string().default('common') }),
+  }),
+  z.object({
+    channel: z.literal('tldr:search'),
+    data: z.object({
+      query: z.string(),
+      platform: z.string().default('common'),
+      limit: z.number().min(1).max(200).default(40),
+    }),
+  }),
+  z.object({
+    channel: z.literal('tldr:page'),
+    data: z.object({
+      command: z.string(),
+      platform: z.string().default('common'),
+      /** True when `platform` names the page's own platform, not the session's. */
+      exact: z.boolean().default(false),
+    }),
+  }),
+  z.object({
+    channel: z.literal('tldr:update'),
+    data: z.object({ force: z.boolean().default(true) }).default({ force: true }),
+  }),
+  z.object({ channel: z.literal('tldr:rebuild'), data: z.any().optional() }),
+  z.object({ channel: z.literal('tldr:clear'), data: z.any().optional() }),
+  /**
+   * Sends a command built in the tldr panel to one session, and only that one.
+   *
+   * `confirmedDestructive` is not a formality: the main process classifies the
+   * command itself and refuses anything that looks destructive until the
+   * operator has been shown it and said yes. A panel that forgot to ask cannot
+   * make this run.
+   */
+  z.object({
+    channel: z.literal('tldr:run'),
+    data: z.object({
+      sessionId: z.string(),
+      command: z.string().min(1),
+      confirmedDestructive: z.boolean().default(false),
+    }),
+  }),
+
   // Detached terminal windows
   z.object({
     channel: z.literal('windows:detach'),
@@ -339,6 +391,8 @@ export const EVENT_CHANNELS = [
   'macro-form-request',
   'macro-confirm-request',
   'ai-stream',
+  /** tldr cache state: download progress, index rebuilds, failures. */
+  'tldr-status',
   'active-session-changed',
   'session-placement-changed',
   'update-status',

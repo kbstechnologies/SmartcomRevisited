@@ -14,6 +14,7 @@ import {
 import { useStore } from '../store/useStore'
 import Terminal from './Terminal'
 import ProfileSelector from './ProfileSelector'
+import TldrIndicator from './TldrIndicator'
 import { selectVisibleSession } from '../lib/paneSelection'
 import type { LayoutMode, Session } from '@shared/types'
 
@@ -181,6 +182,16 @@ export default function SessionWorkspace() {
         </button>
 
         <div className="flex-1" />
+
+        {/* Contextual help for whatever is being typed into the visible pane.
+            This toolbar is the closest thing Smartcom has to "beside the
+            command input": a session is a raw pty, so there is no input box to
+            attach to — see TldrIndicator.
+
+            Not in a detached window: it shows terminals only, and the panel
+            these chips open lives in the main window. A chip that visibly did
+            nothing would be worse than no chip. */}
+        {!isDetached && <TldrIndicator sessionId={visibleSessionId} />}
 
         <span className="text-xs text-gray-500">
           {sessions.length} session{sessions.length === 1 ? '' : 's'}

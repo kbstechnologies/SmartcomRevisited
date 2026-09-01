@@ -1,7 +1,7 @@
 {
   "name": "smartcom-revisited",
   "productName": "Smartcom Revisited",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Cross-platform SSH terminal with macro buttons and logging",
   "author": {
     "name": "Smartcom Revisited Project",
@@ -87,6 +87,7 @@
     "clsx": "^2.0.0",
     "drizzle-orm": "^0.29.1",
     "electron-updater": "^6.1.7",
+    "fflate": "^0.8.3",
     "node-pty": "^1.1.0",
     "node-ssh": "^13.2.0",
     "react": "^18.2.0",
@@ -190,6 +191,7 @@
       ],
       "icon": "build/icon.ico",
       "publisherName": "Smartcom Revisited",
+      "verifyUpdateCodeSignature": false,
       "legalTrademarks": "Smartcom Revisited"
     },
     "nsis": {

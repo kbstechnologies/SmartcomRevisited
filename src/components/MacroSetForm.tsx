@@ -88,101 +88,110 @@ export default function MacroSetForm({ macroSet, onClose, onSave }: MacroSetForm
   }
 
   return (
-    <div className="h-full flex flex-col bg-gray-800">
-      <div className="flex items-center justify-between p-4 border-b border-gray-700">
-        <h2 className="text-lg font-medium text-white">
-          {macroSet ? 'Edit Macro Set' : 'New Macro Set'}
-        </h2>
-        <button
-          onClick={onClose}
-          className="text-gray-400 hover:text-white p-1"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
-
-      <form onSubmit={handleSubmit} className="flex-1 flex flex-col p-4">
-        {errors.general && (
-          <div className="bg-red-600 text-white p-3 rounded-md text-sm mb-4">
-            {errors.general}
-          </div>
-        )}
-
-        <div className="space-y-4 flex-1">
-          <div className="form-group">
-            <label className="form-label">Set Name</label>
-            <input
-              type="text"
-              value={formData.name}
-              onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
-              className="form-input"
-              placeholder="Network Commands"
-              required
-            />
-            {errors.name && <p className="text-red-400 text-xs mt-1">{errors.name}</p>}
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Description</label>
-            <textarea
-              value={formData.description}
-              onChange={(e) => setFormData(prev => ({ ...prev, description: e.target.value }))}
-              className="form-input resize-none h-24"
-              placeholder="Optional description for this macro set"
-            />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Tags</label>
-            <p className="text-[11px] text-gray-400 mb-2">
-              This set appears on any connection sharing one of these tags — tag a switch{' '}
-              <span className="text-gray-300">cisco</span> and it gets every set tagged{' '}
-              <span className="text-gray-300">cisco</span>, including ones installed later.
-            </p>
-            <TagEditor
-              value={formData.tags}
-              onChange={(tags) => setFormData((prev) => ({ ...prev, tags }))}
-              suggestions={knownTags}
-              placeholder="e.g. cisco, firewall, customer-acme"
-            />
-          </div>
-
-          <div className="bg-gray-700 border border-gray-600 rounded-lg p-4">
-            <h3 className="text-sm font-medium text-gray-300 mb-2">Tips</h3>
-            <ul className="text-xs text-gray-400 space-y-1">
-              <li>• Group related macros together (e.g., &quot;Network Troubleshooting&quot;)</li>
-              <li>• Use descriptive names to make organization easier</li>
-              <li>• You can drag and drop macros between sets later</li>
-            </ul>
-          </div>
-        </div>
-
-        <div className="flex justify-end gap-2 pt-4 border-t border-gray-700">
+    <div className="fixed inset-0 z-[58] flex items-center justify-center bg-black/60 p-4">
+      <div className="w-full max-w-lg max-h-[90vh] flex flex-col rounded-lg bg-gray-800 border border-gray-700 shadow-xl">
+        <div className="flex items-center justify-between p-4 border-b border-gray-700">
+          <h2 className="text-lg font-medium text-white">
+            {macroSet ? 'Edit Macro Set' : 'New Macro Set'}
+          </h2>
           <button
-            type="button"
             onClick={onClose}
-            className="btn btn-secondary"
+            className="text-gray-400 hover:text-white p-1"
           >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={saving}
-            className="btn btn-primary"
-          >
-            {saving ? (
-              <>
-                <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin mr-2" />
-                Saving...
-              </>
-            ) : (
-              macroSet ? 'Update' : 'Create'
-            )}
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
           </button>
         </div>
-      </form>
+
+        {/*
+          The form is the flex column that scrolls, and both it and the box
+          below it need min-h-0. A flex child's min-height defaults to auto,
+          which refuses to shrink below its content: without these the dialog
+          grows straight past max-h-[90vh], the overflow never engages, and
+          Cancel/Create sit off the bottom of the screen with no way to reach
+          them. That is what "adding a set does not scroll" looked like.
+        */}
+        <form onSubmit={handleSubmit} className="flex-1 min-h-0 flex flex-col">
+          <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+            {errors.general && (
+              <div className="bg-red-600 text-white p-3 rounded-md text-sm">
+                {errors.general}
+              </div>
+            )}
+            <div className="form-group">
+              <label className="form-label">Set Name</label>
+              <input
+                type="text"
+                value={formData.name}
+                onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+                className="form-input"
+                placeholder="Network Commands"
+                required
+              />
+              {errors.name && <p className="text-red-400 text-xs mt-1">{errors.name}</p>}
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Description</label>
+              <textarea
+                value={formData.description}
+                onChange={(e) => setFormData(prev => ({ ...prev, description: e.target.value }))}
+                className="form-input resize-none h-24"
+                placeholder="Optional description for this macro set"
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Tags</label>
+              <p className="text-[11px] text-gray-400 mb-2">
+                This set appears on any connection sharing one of these tags — tag a switch{' '}
+                <span className="text-gray-300">cisco</span> and it gets every set tagged{' '}
+                <span className="text-gray-300">cisco</span>, including ones installed later.
+              </p>
+              <TagEditor
+                value={formData.tags}
+                onChange={(tags) => setFormData((prev) => ({ ...prev, tags }))}
+                suggestions={knownTags}
+                placeholder="e.g. cisco, firewall, customer-acme"
+              />
+            </div>
+
+            <div className="bg-gray-700 border border-gray-600 rounded-lg p-4">
+              <h3 className="text-sm font-medium text-gray-300 mb-2">Tips</h3>
+              <ul className="text-xs text-gray-400 space-y-1">
+                <li>• Group related macros together (e.g., &quot;Network Troubleshooting&quot;)</li>
+                <li>• Use descriptive names to make organization easier</li>
+                <li>• You can drag and drop macros between sets later</li>
+              </ul>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2 p-4 border-t border-gray-700">
+            <button
+              type="button"
+              onClick={onClose}
+              className="btn btn-secondary"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving}
+              className="btn btn-primary"
+            >
+              {saving ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin mr-2" />
+                  Saving...
+                </>
+              ) : (
+                macroSet ? 'Update' : 'Create'
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   )
 }

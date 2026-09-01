@@ -9,8 +9,14 @@ import {
   DocumentMagnifyingGlassIcon,
   InformationCircleIcon,
   VariableIcon,
+  BookOpenIcon,
+  BoltIcon,
+  SparklesIcon,
+  MagnifyingGlassIcon,
+  PencilSquareIcon,
 } from '@heroicons/react/24/outline'
-import { useStore } from '../store/useStore'
+import type { ComponentType, SVGProps } from 'react'
+import { useStore, type SidePanel } from '../store/useStore'
 import SessionWorkspace from './SessionWorkspace'
 import MacroPanel from './MacroPanel'
 import StatusBar from './StatusBar'
@@ -22,6 +28,8 @@ import LogsViewer from './LogsViewer'
 import AboutDialog from './AboutDialog'
 import AssistantPanel from './AssistantPanel'
 import AssistantSettings from './AssistantSettings'
+import TldrPanel from './TldrPanel'
+import ScratchPad from './ScratchPad'
 
 /** Side panel width limits, in pixels. 384 matches the previous fixed w-96. */
 const MIN_PANEL_WIDTH = 240
@@ -29,7 +37,27 @@ const MAX_PANEL_WIDTH = 900
 const DEFAULT_PANEL_WIDTH = 384
 const PANEL_WIDTH_KEY = 'smartcom.panelWidth'
 
-type SidePanel = 'buttons' | 'assistant'
+/**
+ * The panel tabs.
+ *
+ * Icons rather than labels: three text tabs plus seven utility buttons in one
+ * narrow row left nothing legible, and the panel is routinely dragged down to
+ * 240px. The names survive as tooltips, and each icon is the one that already
+ * means that thing elsewhere in the app — the bolt is a button/macro, the
+ * sparkle is the assistant (the same one on the AI chip above the terminal),
+ * the book is tldr.
+ */
+const PANEL_TABS: Array<{
+  panel: SidePanel
+  label: string
+  Icon: ComponentType<SVGProps<SVGSVGElement>>
+}> = [
+  { panel: 'buttons', label: 'Buttons', Icon: BoltIcon },
+  { panel: 'assistant', label: 'Assistant', Icon: SparklesIcon },
+  // Lower-case on purpose: it is the project's name, not a word.
+  { panel: 'tldr', label: 'tldr', Icon: BookOpenIcon },
+  { panel: 'scratch', label: 'Scratch pad — not saved', Icon: PencilSquareIcon },
+]
 
 export default function Layout() {
   const [panelCollapsed, setPanelCollapsed] = useState(false)
@@ -76,7 +104,13 @@ export default function Layout() {
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
   }
-  const [sidePanel, setSidePanel] = useState<SidePanel>('buttons')
+  /**
+   * Which tab is showing. In the store rather than in local state because three
+   * things outside this component now raise it: the TLDR chip above the
+   * terminal, a Command Center result, and Ask AI inside the tldr panel.
+   */
+  const sidePanel = useStore((state) => state.sidePanel)
+  const setSidePanel = useStore((state) => state.setSidePanel)
   const [showAssistantSettings, setShowAssistantSettings] = useState(false)
 
   // Dialog state lives in the store so the command palette can open these too.
@@ -84,6 +118,19 @@ export default function Layout() {
   const setActiveDialog = useStore((state) => state.setActiveDialog)
   const isDetached = useStore((state) => state.isDetachedWindow)
   const theme = useStore((state) => state.theme)
+
+  const tldrRequest = useStore((state) => state.tldrRequest)
+  const assistantPrefill = useStore((state) => state.assistantPrefill)
+  const setTldrSearchOpen = useStore((state) => state.setTldrSearchOpen)
+
+  /**
+   * Something outside the panel asked for a tab. Opening it while the panel is
+   * collapsed would look like the button did nothing, so reopen it — the
+   * operator asked to see a page, not to change a preference.
+   */
+  useEffect(() => {
+    if (tldrRequest || assistantPrefill) setPanelCollapsed(false)
+  }, [tldrRequest, assistantPrefill])
 
   // A detached window shows terminals only — buttons and dialogs stay in the
   // main window so there is exactly one place that owns them.
@@ -143,23 +190,41 @@ export default function Layout() {
 
             {!panelCollapsed && (
               <>
-                <div className="flex flex-1 rounded overflow-hidden border border-gray-600">
-                  {(['buttons', 'assistant'] as SidePanel[]).map((panel) => (
+                <div className="flex rounded overflow-hidden border border-gray-600 shrink-0">
+                  {PANEL_TABS.map(({ panel, label, Icon }) => (
                     <button
                       key={panel}
                       onClick={() => setSidePanel(panel)}
+                      title={label}
+                      aria-label={label}
+                      aria-pressed={sidePanel === panel}
                       className={clsx(
-                        'flex-1 px-2 py-1 text-xs capitalize transition-colors',
+                        'px-2.5 py-1 transition-colors',
                         sidePanel === panel
                           ? 'bg-blue-600 text-white'
                           : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
                       )}
                     >
-                      {panel}
+                      <Icon className="w-4 h-4" />
                     </button>
                   ))}
                 </div>
 
+                {/* Pushes the dialogs to the right, so the tabs stay a group
+                    rather than blurring into the row of utility buttons. */}
+                <div className="flex-1" />
+
+                {/* The permanent way into tldr for when nothing has been typed
+                    yet: search the whole page set and build a command from it.
+                    A magnifier, not a book — the book is the tab beside it, and
+                    two identical icons a centimetre apart mean neither. */}
+                <button
+                  onClick={() => setTldrSearchOpen(true)}
+                  title="Search tldr commands (Ctrl+Shift+T)"
+                  className="p-1 rounded hover:bg-gray-700 text-gray-400"
+                >
+                  <MagnifyingGlassIcon className="w-4 h-4" />
+                </button>
                 <button
                   onClick={() => setActiveDialog('keys')}
                   title="SSH keys"
@@ -208,14 +273,15 @@ export default function Layout() {
 
           {!panelCollapsed && (
             <div className="flex-1 min-h-0">
-              {sidePanel === 'buttons' ? (
-                <MacroPanel />
-              ) : (
+              {sidePanel === 'buttons' && <MacroPanel />}
+              {sidePanel === 'assistant' && (
                 <AssistantPanel
                   onOpenSettings={() => setShowAssistantSettings(true)}
                   settingsOpen={showAssistantSettings}
                 />
               )}
+              {sidePanel === 'tldr' && <TldrPanel />}
+              {sidePanel === 'scratch' && <ScratchPad />}
             </div>
           )}
         </div>

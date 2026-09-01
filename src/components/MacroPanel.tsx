@@ -725,18 +725,14 @@ export default function MacroPanel() {
         every shipped bundle, which cannot be re-created by hand.
       */}
       {editingSet && (
-        <div className="fixed inset-0 z-[58] flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-lg max-h-[88vh] overflow-y-auto rounded-lg border border-gray-700 shadow-xl">
-            <MacroSetForm
-              macroSet={editingSet}
-              onClose={() => setEditingSet(null)}
-              onSave={() => {
-                setEditingSet(null)
-                void loadMacroSets()
-              }}
-            />
-          </div>
-        </div>
+        <MacroSetForm
+          macroSet={editingSet}
+          onClose={() => setEditingSet(null)}
+          onSave={() => {
+            setEditingSet(null)
+            void loadMacroSets()
+          }}
+        />
       )}
 
       {showSetForm && (

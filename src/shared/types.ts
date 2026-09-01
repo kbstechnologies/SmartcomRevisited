@@ -520,6 +520,16 @@ export const SettingsSchema = z.object({
   defaultShell: z.string().default('/bin/bash'),
 
   /**
+   * Copy a mouse selection to the clipboard the moment it is made.
+   *
+   * PuTTY's behaviour, and what people coming from it expect — highlight, then
+   * middle-click or right-click to paste, with no copy step in between. On by
+   * default for that reason. Off for anyone who would rather a stray drag
+   * across the terminal did not replace what is on their clipboard.
+   */
+  copyOnSelect: z.boolean().default(true),
+
+  /**
    * Folder holding the script library. The folder on disk is the source of
    * truth — scripts are read at send time, so editing one in your own editor
    * (or pulling new ones from git) needs no re-import.
@@ -552,6 +562,22 @@ export const SettingsSchema = z.object({
   autoStartSessionLog: z.boolean().default(false),
   /** `raw` keeps ANSI escapes; `plain` strips them for readable text logs. */
   sessionLogFormat: z.enum(['raw', 'plain']).default('plain'),
+
+  // tldr command intelligence
+  /**
+   * Watch what is typed and offer the matching tldr page.
+   *
+   * Off means no detection at all — no keystroke inspection, no lookups. The
+   * Command Center and the panel still work when opened deliberately, because
+   * turning off the ambient behaviour is not the same as removing the feature.
+   */
+  tldrEnabled: z.boolean().default(true),
+  /** Refresh the page dataset in the background when it goes stale. */
+  tldrAutoUpdate: z.boolean().default(true),
+  /** How stale the dataset may get before an automatic refresh. */
+  tldrUpdateIntervalDays: z.number().min(1).max(90).default(7),
+  /** Starred commands, shown first in the Command Center. */
+  tldrFavourites: z.array(z.string()).default([]),
 
   // Updates
   /** Look for a new release shortly after start-up. */

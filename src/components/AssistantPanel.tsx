@@ -144,6 +144,12 @@ export default function AssistantPanel({ onOpenSettings, settingsOpen }: Assista
   const activeRequest = useStore((state) => state.assistantRequestId)
   const setActiveRequest = useStore((state) => state.setAssistantRequestId)
 
+  // A question handed over from the tldr panel. It arrives as text and goes
+  // out through the same `send` as anything typed here — same provider, same
+  // grounding, same contract. There is deliberately no second AI path.
+  const prefill = useStore((state) => state.assistantPrefill)
+  const setPrefill = useStore((state) => state.setAssistantPrefill)
+
   const saveAiSettings = useStore((state) => state.saveAiSettings)
 
   /** Why an Insert was refused, shown under the code block that was refused. */
@@ -278,6 +284,25 @@ export default function AssistantPanel({ onOpenSettings, settingsOpen }: Assista
   }
 
   const canSend = Boolean(settings) && !keyMissing && !activeRequest
+
+  /**
+   * Picks up a question queued by Ask AI elsewhere in the app.
+   *
+   * When the assistant is ready it is sent straight away, because the operator
+   * already pressed a button that said "ask". When it is not — no key yet, a
+   * reply still streaming — it lands in the input box instead of vanishing, so
+   * the click is never silently lost.
+   */
+  useEffect(() => {
+    if (!prefill) return
+    setPrefill(null)
+    if (canSend) {
+      void send(prefill, 'explain')
+    } else {
+      setInput(prefill)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill, canSend])
 
   const selectClass =
     'min-w-0 rounded bg-gray-800 border border-gray-600 text-[11px] text-gray-200 px-1 py-0.5 ' +

@@ -77,6 +77,13 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
   const [portsError, setPortsError] = useState<string | null>(null)
   const [scanning, setScanning] = useState(false)
   const [localShells, setLocalShells] = useState<LocalShellInfo[]>([])
+  /**
+   * Raw text of the arguments box while it is being typed. Deriving it back
+   * from the array ate the space between two arguments — "-d " splits to
+   * ["-d"], which renders as "-d" — so a second argument could never be
+   * reached. Cleared on blur, when canonical spacing is what to show.
+   */
+  const [argsDraft, setArgsDraft] = useState<string | null>(null)
   const [shellsError, setShellsError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<string | null>(null)
@@ -355,13 +362,12 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
               <div>
                 <label className={labelClass}>Arguments</label>
                 <input
-                  value={(form.shellArgs ?? []).join(' ')}
-                  onChange={(event) =>
-                    update(
-                      'shellArgs',
-                      event.target.value.split(/\s+/).filter(Boolean)
-                    )
-                  }
+                  value={argsDraft ?? (form.shellArgs ?? []).join(' ')}
+                  onChange={(event) => {
+                    setArgsDraft(event.target.value)
+                    update('shellArgs', event.target.value.split(/\s+/).filter(Boolean))
+                  }}
+                  onBlur={() => setArgsDraft(null)}
                   placeholder="-d Ubuntu-22.04"
                   className={`${inputClass} font-mono`}
                 />

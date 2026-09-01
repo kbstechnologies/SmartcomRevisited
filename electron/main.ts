@@ -41,6 +41,10 @@ import { WindowManager } from './window-manager'
 import { Assistant } from './ai/assistant'
 import { listOllamaModels } from './ai/providers'
 import { AiSettingsSchema, type AiSettings } from '../src/shared/ai'
+import { TldrService, type TldrStatusEvent } from './tldr/tldr-service'
+import { DEFAULT_UPDATE_INTERVAL_DAYS } from './tldr/tldr-store'
+import { decideTldrRun } from '../src/shared/tldr-run'
+import { isTldrPlatform } from '../src/shared/tldr'
 
 /** Must match `server.port` in the vite configs. */
 const DEFAULT_DEV_SERVER_URL = 'http://127.0.0.1:5273'
@@ -68,6 +72,7 @@ class SmartcomRevisitedApp {
   private sshManager!: SSHManager
   private windows!: WindowManager
   private assistant!: Assistant
+  private tldr!: TldrService
   private updates!: UpdateService
   private userMachine: string
   /** Set once the operator has agreed to quit with macros still running. */
@@ -174,6 +179,45 @@ class SmartcomRevisitedApp {
     this.updates = new UpdateService((status) => this.windows.broadcast('update-status', status))
 
     this.setupAssistant()
+    this.setupTldr()
+  }
+
+  /**
+   * Brings up the tldr documentation service.
+   *
+   * Constructed here but never awaited: `ensureCache` is fired well after the
+   * window is up, and its failures are swallowed on purpose. Documentation is
+   * a convenience layered on a terminal — no part of this may delay start-up,
+   * and no part of it may stop the app if the network is absent, filtered or
+   * pointed at an internal mirror that has never heard of GitHub.
+   */
+  private setupTldr() {
+    this.tldr = new TldrService({
+      cacheDir: join(app.getPath('userData'), 'tldr'),
+      log: (event, detail) => console.log(`[tldr] ${event}`, detail ?? ''),
+    })
+
+    this.tldr.on('status', (event: TldrStatusEvent) => {
+      this.windows.broadcast('tldr-status', event)
+    })
+
+    // Well behind the update check, and behind the first paint: a cold start
+    // that has to fetch three megabytes should do it while the operator is
+    // already connecting to something.
+    setTimeout(() => {
+      const settings = this.db.getAllSettings()
+      if (settings.tldrEnabled === false) return
+      void this.tldr.ensureCache({
+        // A missing cache is still fetched with auto-update off; the setting
+        // governs *refreshing* a dataset that already works, not having one.
+        // An interval no cache can reach expresses that without a second flag.
+        intervalDays:
+          settings.tldrAutoUpdate === false
+            ? Number.MAX_SAFE_INTEGER
+            : (settings.tldrUpdateIntervalDays ?? DEFAULT_UPDATE_INTERVAL_DAYS),
+        force: false,
+      })
+    }, 12_000)
   }
 
   /**
@@ -1399,6 +1443,111 @@ class SmartcomRevisitedApp {
                 }`,
               }
             }
+          }
+
+          // ------------------------------------------------------------- tldr
+          case 'tldr:status':
+            return {
+              success: true,
+              data: { ...this.tldr.getStatus(), cacheBytes: this.tldr.getCacheSize() },
+            }
+
+          case 'tldr:lookup':
+            return {
+              success: true,
+              data: this.tldr.lookup(request.data.command, request.data.platform),
+            }
+
+          case 'tldr:search':
+            return {
+              success: true,
+              data: this.tldr.search(request.data.query, request.data.platform, request.data.limit),
+            }
+
+          case 'tldr:page': {
+            const { command, platform, exact } = request.data
+            const page =
+              exact && isTldrPlatform(platform)
+                ? this.tldr.getExactPage(command, platform)
+                : this.tldr.getPage(command, platform)
+
+            return {
+              success: true,
+              data: {
+                page,
+                related: page ? this.tldr.getRelated(page.command, platform) : [],
+                platforms: this.tldr.getPlatforms(command),
+              },
+            }
+          }
+
+          case 'tldr:update':
+            return { success: true, data: await this.tldr.update() }
+
+          case 'tldr:rebuild':
+            return { success: true, data: await this.tldr.rebuildIndex() }
+
+          case 'tldr:clear':
+            return { success: true, data: await this.tldr.clear() }
+
+          /**
+           * Runs a command the operator built in the tldr panel, on one session.
+           *
+           * Both safety properties live here rather than in the renderer,
+           * because a renderer bug — a stale target, a panel that stayed open
+           * while the operator switched tabs — is exactly what this guards
+           * against:
+           *
+           *  - The command goes to the session named in the request and to no
+           *    other. There is no broadcast path and no "active session"
+           *    fallback: an unknown or disconnected id is refused, never
+           *    quietly redirected to whatever happens to be in front.
+           *  - Anything classified as destructive is refused until the caller
+           *    states the operator was shown it and agreed.
+           *
+           * tldr is documentation, not a safety review — it documents `rm -rf`
+           * as cheerfully as it documents `ls`.
+           */
+          case 'tldr:run': {
+            const { sessionId, command, confirmedDestructive } = request.data
+            const session = this.sshManager.getSession(sessionId)
+
+            // The decision itself is a pure function so it can be tested
+            // without a process, a connection or a UI — see tldr-run.ts.
+            const decision = decideTldrRun({
+              target: session
+                ? { name: session.profile.name, status: session.status }
+                : null,
+              command,
+              confirmedDestructive,
+            })
+
+            if (!decision.allow) {
+              if (decision.kind === 'needs-confirmation') {
+                return {
+                  success: true,
+                  data: { ran: false, requiresConfirmation: true, reasons: decision.reasons },
+                }
+              }
+              return { success: false, error: decision.message }
+            }
+
+            const sent = this.sshManager.sendToSession(sessionId, `${command}\n`)
+            if (!sent) {
+              return { success: false, error: 'The session did not accept the command.' }
+            }
+
+            console.log('[tldr] command executed', { sessionId, destructive: decision.destructive })
+            this.logAudit({
+              userMachine: this.userMachine,
+              sessionId,
+              profileId: session!.profile.id!,
+              macroName: decision.destructive ? 'tldr (confirmed)' : 'tldr',
+              commands: [command],
+              result: 'success',
+            })
+
+            return { success: true, data: { ran: true, requiresConfirmation: false, reasons: [] } }
           }
 
           // ------------------------------------------------- detached windows

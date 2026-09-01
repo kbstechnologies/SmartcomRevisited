@@ -229,6 +229,23 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
           </div>
         </div>
 
+        {/* Attribution the tldr-pages licence requires, wherever its content is
+            shown. The pages ship with the app, so the notice does too. */}
+        <div className="px-4 py-2 border-t border-gray-700 text-[10px] text-gray-500 leading-relaxed">
+          Command documentation from the{' '}
+          <button
+            onClick={() =>
+              void window.electronAPI.invoke('app:open-external', {
+                url: 'https://github.com/tldr-pages/tldr',
+              })
+            }
+            className="text-blue-400 hover:text-blue-300 underline"
+          >
+            tldr-pages
+          </button>{' '}
+          project, used under CC BY 4.0.
+        </div>
+
         <div className="flex items-center justify-between px-4 py-3 border-t border-gray-700">
           <span className="text-[11px] text-gray-500">MIT licensed</span>
           <div className="flex gap-2">

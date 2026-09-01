@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import SecureCrtPanel from './SecureCrtPanel'
+import TldrSettings from './TldrSettings'
 import { useStore } from '../store/useStore'
 import { SettingsSchema } from '@shared/types'
 import type { Settings } from '@shared/types'
@@ -59,6 +60,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     { id: 'general', label: 'General', icon: '⚙️' },
     { id: 'terminal', label: 'Terminal', icon: '💻' },
     { id: 'logging', label: 'Logging', icon: '📝' },
+    { id: 'tldr', label: 'tldr', icon: '📖' },
     { id: 'security', label: 'Security', icon: '🔒' },
     { id: 'advanced', label: 'Advanced', icon: '🧰' },
   ]
@@ -232,6 +234,26 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                       </div>
 
                       <div className="form-group">
+                        <label className="flex items-start gap-2 text-sm text-gray-300">
+                          <input
+                            type="checkbox"
+                            checked={formData.copyOnSelect !== false}
+                            onChange={(e) => handleChange('copyOnSelect', e.target.checked)}
+                            className="mt-0.5"
+                          />
+                          <span>
+                            Copy on selection
+                            <span className="block text-xs text-gray-400">
+                              Highlighting text in a terminal puts it straight on the clipboard,
+                              the way PuTTY does. Right-click still pastes. Turn off if a stray
+                              drag replacing your clipboard would be worse than an extra
+                              Ctrl+Shift+C.
+                            </span>
+                          </span>
+                        </label>
+                      </div>
+
+                      <div className="form-group">
                         <label className="form-label">Default Shell</label>
                         <input
                           type="text"
@@ -287,6 +309,10 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                       </div>
                     </div>
                   </div>
+                )}
+
+                {activeTab === 'tldr' && (
+                  <TldrSettings values={formData} onChange={handleChange} />
                 )}
 
                 {activeTab === 'advanced' && <SecureCrtPanel />}

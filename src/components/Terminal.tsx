@@ -8,6 +8,7 @@ import { ArrowDownIcon } from '@heroicons/react/24/solid'
 import '@xterm/xterm/css/xterm.css'
 import { useStore } from '../store/useStore'
 import { primeSessionHistory, subscribeToSession } from '../lib/sessionStream'
+import { noteKeystrokes, noteOutput } from '../lib/commandLine'
 
 interface TerminalProps {
   sessionId: string
@@ -51,6 +52,11 @@ export default function Terminal({ sessionId, isActive = true }: TerminalProps) 
   // values forever (the original bug that stopped typing from being sent).
   const broadcastRef = useRef(broadcastInput)
   broadcastRef.current = broadcastInput
+
+  // Same reasoning: the mouseup listener is registered once per session, so it
+  // has to read the current setting rather than the one at first render.
+  const copyOnSelectRef = useRef(settings.copyOnSelect !== false)
+  copyOnSelectRef.current = settings.copyOnSelect !== false
 
   /**
    * Whether the viewport is parked above the live end of the buffer. Output
@@ -151,6 +157,10 @@ export default function Terminal({ sessionId, isActive = true }: TerminalProps) 
     }
 
     const write = (chunk: string) => {
+      // Before the write, not after: the tldr indicator only needs to know
+      // whether the far end is currently asking for a password, and holding
+      // that answer back behind xterm's parser would be a frame late.
+      noteOutput(sessionId, chunk)
       if (opened) xterm.write(chunk)
       else pending.push(chunk)
     }
@@ -159,6 +169,11 @@ export default function Terminal({ sessionId, isActive = true }: TerminalProps) 
     const { sendToSession, broadcast, resizeSession } = useStore.getState()
 
     const dataSub = xterm.onData((data) => {
+      // Recorded before the send so nothing is ever delayed by it. The tracker
+      // is a few string operations and cannot throw; if that ever stops being
+      // true it belongs behind the send, not in front of it.
+      noteKeystrokes(sessionId, data)
+
       if (broadcastRef.current) {
         void broadcast(data)
       } else {
@@ -213,6 +228,26 @@ export default function Terminal({ sessionId, isActive = true }: TerminalProps) 
     }
     container.addEventListener('contextmenu', handleContextMenu)
 
+    /**
+     * PuTTY's copy-on-select: releasing the mouse over a highlight puts it on
+     * the clipboard, with no copy step in between.
+     *
+     * On mouseup rather than xterm's `onSelectionChange`, which fires on every
+     * frame of a drag — that would write to the clipboard dozens of times per
+     * selection. The selection is deliberately *not* cleared afterwards: the
+     * highlight is how you can see what you just took.
+     *
+     * An empty selection is ignored, so an ordinary click to focus a pane
+     * never clobbers what is already on the clipboard.
+     */
+    const handleMouseUp = () => {
+      if (!copyOnSelectRef.current) return
+      const selection = xterm.getSelection()
+      if (!selection) return
+      void window.electronAPI.invoke('clipboard:write', { text: selection })
+    }
+    container.addEventListener('mouseup', handleMouseUp)
+
     xterm.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown' || !event.ctrlKey || !event.shiftKey) return true
 
@@ -222,6 +257,16 @@ export default function Terminal({ sessionId, isActive = true }: TerminalProps) 
       }
       if (event.key === 'V' || event.key === 'v') {
         void pasteClipboard()
+        return false
+      }
+      // The tldr Command Center. Handled here as well as through the global
+      // hotkey because a focused terminal swallows keys before they reach the
+      // document — and a focused terminal is exactly when you want it.
+      if (event.key === 'T' || event.key === 't') {
+        // A detached window has nowhere to show a result, so the key is left
+        // alone there rather than swallowed to no effect.
+        if (useStore.getState().isDetachedWindow) return true
+        useStore.getState().setTldrSearchOpen(true)
         return false
       }
       return true
@@ -291,6 +336,7 @@ export default function Terminal({ sessionId, isActive = true }: TerminalProps) 
       cancelAnimationFrame(raf)
       observer.disconnect()
       container.removeEventListener('contextmenu', handleContextMenu)
+      container.removeEventListener('mouseup', handleMouseUp)
       window.electronAPI.off('session-status-changed', handleStatus)
       unsubscribe()
       detachViewportScroll()

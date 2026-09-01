@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { clearSessionBuffer } from '../lib/sessionStream'
+import { clearCommandLine } from '../lib/commandLine'
 import type {
   Profile,
   Session,
@@ -20,6 +21,7 @@ import type {
 } from '@shared/types'
 import type { AiSettings, AiAsk, AiStreamEvent, AssistantTurn } from '@shared/ai'
 import type { GlobalVar, GlobalVarProblem } from '@shared/global-vars'
+import type { TldrCacheStatus, TldrPage, TldrPlatform, TldrSearchResult } from '@shared/tldr'
 
 /** A macro in flight, as reported by the main process. */
 export interface RunningMacro {
@@ -61,6 +63,45 @@ export interface PendingConfirmRequest {
 
 /** Modal dialogs that can be opened from more than one place. */
 export type AppDialog = 'keys' | 'settings' | 'logs' | 'about' | 'scripts' | 'globals' | null
+
+/**
+ * Which tab the right-hand panel is showing.
+ *
+ * In the store rather than in Layout's own state because three different places
+ * now need to raise it: the tldr indicator above the terminal, a Command Center
+ * result, and the Ask AI button inside the tldr panel.
+ */
+export type SidePanel = 'buttons' | 'assistant' | 'tldr' | 'scratch'
+
+/** What the tldr panel has been asked to show. */
+export interface TldrRequest {
+  command: string
+  /** Session platform, or the page's own platform when `exact`. */
+  platform: string
+  /** True when `platform` names the page variant rather than the session. */
+  exact?: boolean
+  /** Session the panel should act on. Fixed at open time, then tracked. */
+  sessionId: string | null
+}
+
+/** Answer to `tldr:page`. */
+export interface TldrPageResult {
+  page: TldrPage | null
+  related: TldrSearchResult[]
+  platforms: TldrPlatform[]
+}
+
+/** `tldr:status`, plus what the cache occupies on disk. */
+export interface TldrStatus extends TldrCacheStatus {
+  cacheBytes: number
+}
+
+/** Answer to `tldr:run`. A refusal is not an error — it is a question. */
+export interface TldrRunResult {
+  ran: boolean
+  requiresConfirmation: boolean
+  reasons: string[]
+}
 
 export interface MacroProgress {
   macroName?: string
@@ -125,6 +166,38 @@ interface AppStore {
   assistantTurns: AssistantTurn[]
   assistantInput: string
   assistantRequestId: string | null
+  /**
+   * A question queued for the assistant from somewhere else in the app.
+   *
+   * The tldr panel's Ask AI does not build a second AI path: it drops the
+   * question here and raises the assistant tab, and AssistantPanel sends it
+   * through exactly the same `ai:ask` it uses for anything typed into it.
+   */
+  assistantPrefill: string | null
+
+  /** Which tab the right-hand panel is showing. */
+  sidePanel: SidePanel
+  /** The page the tldr panel is showing, or null when it has nothing yet. */
+  tldrRequest: TldrRequest | null
+  /** Cache state, mirrored from the main process and its `tldr-status` push. */
+  tldrStatus: TldrStatus | null
+  /** Whether the searchable Command Center is open. */
+  tldrSearchOpen: boolean
+
+  /**
+   * The scratch pad: somewhere to park text between two terminals.
+   *
+   * Held here and **nowhere else**. It is not a setting, it is not in the
+   * database, and it is not written to disk — closing Smartcom throws it away,
+   * which is the point. It lives in the store rather than in the component
+   * only because the side panel unmounts whenever you switch tabs, which would
+   * otherwise lose what you had parked in it a second ago.
+   *
+   * Deliberately not persisted for a second reason: the obvious thing to park
+   * in it while working is a credential, and a notepad that quietly kept one
+   * on disk would be a worse feature than no notepad.
+   */
+  scratchpad: string
 
   // Data
   profiles: Profile[]
@@ -182,6 +255,46 @@ interface AppStore {
   setAssistantTurns: (update: AssistantTurn[] | ((current: AssistantTurn[]) => AssistantTurn[])) => void
   setAssistantInput: (input: string) => void
   setAssistantRequestId: (requestId: string | null) => void
+  setAssistantPrefill: (prompt: string | null) => void
+
+  setScratchpad: (text: string) => void
+
+  // tldr command intelligence
+  setSidePanel: (panel: SidePanel) => void
+  setTldrSearchOpen: (open: boolean) => void
+  setTldrStatus: (status: TldrStatus) => void
+  loadTldrStatus: () => Promise<void>
+  /** Raises the tldr tab on a command. The only way the panel is opened. */
+  openTldr: (request: {
+    command: string
+    platform: string
+    exact?: boolean
+    /** The pane this came from. Defaults to whatever has focus. */
+    sessionId?: string | null
+  }) => void
+  closeTldr: () => void
+  /** Index-only existence check. Safe to call on a typing debounce. */
+  tldrLookup: (
+    command: string,
+    platform: string
+  ) => Promise<{ found: boolean; platform: TldrPlatform | null }>
+  tldrSearch: (query: string, platform: string, limit?: number) => Promise<TldrSearchResult[]>
+  tldrPage: (command: string, platform: string, exact?: boolean) => Promise<TldrPageResult>
+  tldrUpdate: () => Promise<TldrStatus>
+  tldrRebuild: () => Promise<TldrStatus>
+  tldrClear: () => Promise<TldrStatus>
+  /**
+   * Sends a built command to one session. The main process re-checks both the
+   * target and the risk, so a `false` confirmation is a question, not a failure.
+   */
+  runTldrCommand: (
+    sessionId: string,
+    command: string,
+    confirmedDestructive?: boolean
+  ) => Promise<TldrRunResult>
+  toggleTldrFavourite: (command: string) => Promise<void>
+  /** Hands a question to the existing assistant panel and raises it. */
+  askAiAbout: (prompt: string) => void
   /** Folds one streamed chunk into the trailing assistant turn. */
   applyAssistantStream: (event: AiStreamEvent) => void
   setMacroProgress: (sessionId: string, progress: MacroProgress) => void
@@ -365,6 +478,12 @@ const useStore = create<AppStore>((set, get) => ({
   assistantTurns: [],
   assistantInput: '',
   assistantRequestId: null,
+  assistantPrefill: null,
+  sidePanel: 'buttons',
+  tldrRequest: null,
+  tldrStatus: null,
+  tldrSearchOpen: false,
+  scratchpad: '',
   profiles: [],
   sessions: [],
   macros: [],
@@ -491,6 +610,100 @@ const useStore = create<AppStore>((set, get) => ({
   setAssistantInput: (input) => set({ assistantInput: input }),
 
   setAssistantRequestId: (requestId) => set({ assistantRequestId: requestId }),
+
+  setAssistantPrefill: (assistantPrefill) => set({ assistantPrefill }),
+
+  setScratchpad: (scratchpad) => set({ scratchpad }),
+
+  // ------------------------------------------------------------------- tldr
+  setSidePanel: (sidePanel) => set({ sidePanel }),
+  setTldrSearchOpen: (tldrSearchOpen) => set({ tldrSearchOpen }),
+  setTldrStatus: (tldrStatus) => set({ tldrStatus }),
+
+  loadTldrStatus: async () => {
+    try {
+      set({ tldrStatus: await invoke<TldrStatus>('tldr:status') })
+    } catch {
+      // An older main process, or one whose service failed to construct. The
+      // panel reads a null status as "documentation unavailable" and says so.
+    }
+  },
+
+  openTldr: (request) =>
+    set({
+      // The target is captured now — the pane the command was detected in, or
+      // whatever has focus when the request came from a search. Re-reading it
+      // later would mean a command built for one box could be sent to whichever
+      // tab happened to be in front by the time Run was pressed.
+      tldrRequest: {
+        command: request.command,
+        platform: request.platform,
+        exact: request.exact,
+        sessionId: request.sessionId ?? get().activeSessionId,
+      },
+      sidePanel: 'tldr',
+      tldrSearchOpen: false,
+    }),
+
+  closeTldr: () => set({ tldrRequest: null }),
+
+  tldrLookup: async (command, platform) => {
+    try {
+      return await invoke<{ found: boolean; platform: TldrPlatform | null }>('tldr:lookup', {
+        command,
+        platform,
+      })
+    } catch {
+      return { found: false, platform: null }
+    }
+  },
+
+  tldrSearch: async (query, platform, limit) => {
+    try {
+      return await invoke<TldrSearchResult[]>('tldr:search', { query, platform, limit })
+    } catch {
+      return []
+    }
+  },
+
+  tldrPage: async (command, platform, exact = false) => {
+    try {
+      return await invoke<TldrPageResult>('tldr:page', { command, platform, exact })
+    } catch {
+      return { page: null, related: [], platforms: [] }
+    }
+  },
+
+  tldrUpdate: async () => {
+    const status = await invoke<TldrStatus>('tldr:update')
+    await get().loadTldrStatus()
+    return status
+  },
+
+  tldrRebuild: async () => {
+    const status = await invoke<TldrStatus>('tldr:rebuild')
+    await get().loadTldrStatus()
+    return status
+  },
+
+  tldrClear: async () => {
+    const status = await invoke<TldrStatus>('tldr:clear')
+    await get().loadTldrStatus()
+    return status
+  },
+
+  runTldrCommand: async (sessionId, command, confirmedDestructive = false) =>
+    invoke<TldrRunResult>('tldr:run', { sessionId, command, confirmedDestructive }),
+
+  toggleTldrFavourite: async (command) => {
+    const current = get().settings.tldrFavourites ?? []
+    const tldrFavourites = current.includes(command)
+      ? current.filter((entry) => entry !== command)
+      : [...current, command]
+    await get().saveSettings({ tldrFavourites })
+  },
+
+  askAiAbout: (prompt) => set({ assistantPrefill: prompt, sidePanel: 'assistant' }),
 
   applyAssistantStream: (event) =>
     set((state) => {
@@ -650,6 +863,9 @@ const useStore = create<AppStore>((set, get) => ({
     get().setSessionLog(sessionId, null)
     // Retained output would otherwise outlive the session it belongs to.
     clearSessionBuffer(sessionId)
+    // As would the reconstructed command line, which is the more sensitive of
+    // the two — it is a keystroke buffer.
+    clearCommandLine(sessionId)
     await get().loadSessions()
     return result
   },
