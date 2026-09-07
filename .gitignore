@@ -144,3 +144,9 @@ Thumbs.db
 # release/ wholesale and took the 1.3.0 brief with it once.
 /WEBSITE-UPDATE-*.md
 /RELEASE-NOTES-*.md
+
+# Local convenience launcher. Double-clicking it opens Claude Code in this
+# directory; it hard-codes a personal install path, so it is never published.
+# Like the rules above, this lives in the working tree because robocopy /MIR
+# would otherwise overwrite a mirror-only edit on the next sync.
+/start-claude.bat

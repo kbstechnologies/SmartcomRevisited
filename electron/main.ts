@@ -45,6 +45,16 @@ import { TldrService, type TldrStatusEvent } from './tldr/tldr-service'
 import { DEFAULT_UPDATE_INTERVAL_DAYS } from './tldr/tldr-store'
 import { decideTldrRun } from '../src/shared/tldr-run'
 import { isTldrPlatform } from '../src/shared/tldr'
+import { CloudService } from './cloud/cloud-service'
+import { SyncService } from './cloud/sync-service'
+import { SftpService } from './sftp/sftp-service'
+import type { SftpQueueState } from '../src/shared/sftp'
+import {
+  CloudSettingsSchema,
+  CLOUD_DEFAULT_BASE_URL,
+  type CloudState,
+  type SyncStatus,
+} from '../src/shared/cloud'
 
 /** Must match `server.port` in the vite configs. */
 const DEFAULT_DEV_SERVER_URL = 'http://127.0.0.1:5273'
@@ -73,6 +83,10 @@ class SmartcomRevisitedApp {
   private windows!: WindowManager
   private assistant!: Assistant
   private tldr!: TldrService
+  private cloud!: CloudService
+  private sftp!: SftpService
+  private sync!: SyncService
+  private syncTimer: NodeJS.Timeout | null = null
   private updates!: UpdateService
   private userMachine: string
   /** Set once the operator has agreed to quit with macros still running. */
@@ -180,6 +194,146 @@ class SmartcomRevisitedApp {
 
     this.setupAssistant()
     this.setupTldr()
+    this.setupCloud()
+    this.setupSftp()
+  }
+
+  /**
+   * The SFTP explorer's queue and its record of open panes.
+   *
+   * In the main process because a transfer outlives the panel that started it:
+   * the explorer can be popped out to another monitor, switched away from or
+   * closed while a download runs, and every window has to see the same queue.
+   */
+  private setupSftp() {
+    this.sftp = new SftpService({
+      download: (sessionId, remotePath, localPath, onProgress, shouldCancel) =>
+        this.sshManager.downloadFile(sessionId, remotePath, localPath, onProgress, {
+          // The operator queued this, so a macro cancelled earlier on the same
+          // session must not take it down with it.
+          honourMacroCancel: false,
+          shouldCancel,
+        }),
+      profileName: (sessionId) =>
+        this.sshManager.getSession(sessionId)?.profile.name ?? 'Unknown host',
+      log: (event, detail) => console.log(`[sftp] ${event}`, detail ?? ''),
+    })
+
+    this.sftp.on('queue-changed', (state: SftpQueueState) => {
+      this.windows.broadcast('sftp-queue-changed', state)
+    })
+
+    this.sftp.on('panes-changed', (sessionIds: string[]) => {
+      this.windows.broadcast('sftp-panes-changed', { sessionIds })
+    })
+  }
+
+  /**
+   * Brings up the optional SmartCom Cloud account.
+   *
+   * Constructed unconditionally so the IPC handlers always have something to
+   * talk to, but it makes no request unless the feature is on — `initialize()`
+   * returns immediately when it is off, and every method refuses without
+   * touching the network. A build that nobody enables never contacts a
+   * SmartCom server.
+   *
+   * `initialize()` only reads the OS keystore, so an install that opens on a
+   * train still shows "signed in" rather than announcing a sign-out it has no
+   * evidence for.
+   */
+  private setupCloud() {
+    this.cloud = new CloudService({
+      getSettings: () => this.cloudSettings(),
+      // Not in SettingsSchema on purpose: the settings form round-trips every
+      // field it holds, and a stale form saving a blank id would hand this
+      // machine a new identity and burn a slot in the account's device limit.
+      getDeviceId: () => (this.db.getSetting('cloudDeviceId' as never) as string | null) || null,
+      setDeviceId: (deviceId) => this.db.setSetting('cloudDeviceId' as never, deviceId),
+      appVersion: app.getVersion(),
+      platform: process.platform,
+      defaultDeviceName: hostname(),
+      log: (event, detail) => console.log(`[cloud] ${event}`, detail ?? ''),
+    })
+
+    this.cloud.on('status', (state: CloudState) => {
+      this.windows.broadcast('cloud-status', state)
+    })
+
+    // Sync is layered on top and is a separate decision from having an
+    // account: signing in for the device list and billing does not imply that
+    // this machine's connections should leave it.
+    this.sync = new SyncService({
+      post: (path, body) => this.cloud.postWithStatus(path, body),
+      canReach: () => this.cloud.canReachServer(),
+      isEnabled: () =>
+        this.cloudSettings().enabled && this.db.getAllSettings().cloudSyncEnabled === true,
+      getWorkspaceId: () => (this.db.getSetting('cloudWorkspaceId' as never) as string) || null,
+      setWorkspace: (id, name) => {
+        this.db.setSetting('cloudWorkspaceId' as never, id)
+        this.db.setSetting('cloudWorkspaceName' as never, name)
+      },
+      // Blank rather than deleted: the settings table has no delete, and a
+      // blank reads as null through the getter above.
+      forgetWorkspace: () => {
+        this.db.setSetting('cloudWorkspaceId' as never, '')
+        this.db.setSetting('cloudWorkspaceName' as never, '')
+      },
+      listLocalChanges: (limit) => this.db.listLocalChanges(limit),
+      countLocalChanges: () => this.db.countLocalChanges(),
+      markSynced: (entries) => this.db.markSynced(entries),
+      applyRemoteChange: (change) => this.db.applyRemoteChange(change),
+      getCursor: (workspaceId) => this.db.getSyncCursor(workspaceId),
+      setCursor: (workspaceId, cursor) => this.db.setSyncCursor(workspaceId, cursor),
+      getLastSyncAt: (workspaceId) => this.db.getLastSyncAt(workspaceId),
+      log: (event, detail) => console.log(`[sync] ${event}`, detail ?? ''),
+    })
+
+    this.sync.on('status', (status: SyncStatus) => {
+      this.windows.broadcast('cloud-sync-status', status)
+    })
+
+    void this.cloud.initialize().catch((error) => {
+      console.error('[cloud] initialize failed', error)
+    })
+
+    this.scheduleSync()
+  }
+
+  /**
+   * The background sync timer.
+   *
+   * Deliberately unhurried, and started well after the window is up. Sync is a
+   * convenience layered on a terminal: it must never compete with a connection
+   * being opened, and an interval short enough to feel "live" would be an
+   * interval that wakes a laptop's radio every minute for no benefit.
+   */
+  private scheduleSync() {
+    if (this.syncTimer) clearInterval(this.syncTimer)
+
+    const minutes = this.db.getAllSettings().cloudSyncIntervalMinutes ?? 15
+    if (minutes <= 0) return
+
+    this.syncTimer = setInterval(
+      () => {
+        void this.sync.syncNow()
+      },
+      minutes * 60_000
+    )
+
+    // A first pass once the app has settled, so a machine that was off while
+    // another was edited catches up without anybody pressing anything.
+    setTimeout(() => void this.sync.syncNow(), 20_000)
+  }
+
+  /** The three user-facing settings, normalised into what the service wants. */
+  private cloudSettings() {
+    const settings = this.db.getAllSettings()
+
+    return CloudSettingsSchema.parse({
+      enabled: settings.cloudEnabled ?? false,
+      baseUrl: settings.cloudBaseUrl?.trim() || CLOUD_DEFAULT_BASE_URL,
+      deviceName: settings.cloudDeviceName ?? '',
+    })
   }
 
   /**
@@ -844,6 +998,10 @@ class SmartcomRevisitedApp {
 
             const closed = this.sshManager.closeSession(sessionId)
             this.windows.forgetSession(sessionId)
+            // The explorer pane goes with the session, and anything still
+            // queued for it is cancelled: those transfers cannot succeed, and
+            // a queue full of items that will never move is worse than none.
+            this.sftp.forgetSession(sessionId)
             return { success: true, data: { closed } }
           }
 
@@ -891,6 +1049,223 @@ class SmartcomRevisitedApp {
                 ),
               },
             }
+
+          /**
+           * Fetches one file from the host, for the operator.
+           *
+           * Deliberately not confined to the transfer folder, unlike the
+           * `download` macro step. That confinement exists because a button
+           * from the exchange supplies its own paths and could write anywhere;
+           * here the remote path is typed by the person at the keyboard and the
+           * destination is chosen in the operating system's own save dialog.
+           * Both ends are a deliberate choice made in the moment, which is the
+           * same trust model as any browser download — and confining it would
+           * make the feature useless for its actual purpose, which is getting a
+           * capture or a config off a device and into wherever the work is.
+           */
+          case 'sessions:download-file': {
+            const { sessionId, remotePath } = request.data
+            const session = this.sshManager.getSession(sessionId)
+
+            if (!session) return { success: false, error: 'Session not found' }
+
+            // Trailing slashes and stray whitespace are the two things people
+            // paste in from a terminal; neither is a path SFTP will stat.
+            const remote = remotePath.trim().replace(/\/+$/, '')
+            if (!remote) return { success: false, error: 'Enter the path of the file to download.' }
+
+            // Ask the host about the file *before* asking where to put it.
+            // Choosing a destination and only then being told the path was
+            // wrong is a pointless round of a file dialog, and it is the
+            // mistake people make most — a typo, or a path copied with the
+            // prompt still attached.
+            try {
+              const stats = await this.sshManager.statRemoteFile(sessionId, remote)
+
+              if (stats.isDirectory) {
+                return {
+                  success: false,
+                  error: `${remote} is a folder. Downloads take one file at a time.`,
+                }
+              }
+            } catch (error) {
+              return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error),
+              }
+            }
+
+            const suggested = remote.split('/').pop() || 'download'
+
+            const target = await dialog.showSaveDialog(this.mainWindow!, {
+              title: `Save ${suggested} from ${session.profile.name}`,
+              defaultPath: join(app.getPath('downloads'), suggested),
+            })
+
+            if (target.canceled || !target.filePath) {
+              return { success: false, error: 'Download cancelled' }
+            }
+
+            // `fastGet` reports every chunk, which for a hundred-megabyte
+            // capture is thousands of callbacks. Throttled to something a
+            // progress bar can actually use — the renderer cannot paint faster
+            // than this anyway, and flooding IPC to say "0.03% more" competes
+            // with the terminal for the same thread.
+            let lastReport = 0
+
+            try {
+              const { bytes } = await this.sshManager.downloadFile(
+                sessionId,
+                remote,
+                target.filePath,
+                (transferred, total) => {
+                  const now = Date.now()
+                  if (transferred < total && now - lastReport < 100) return
+                  lastReport = now
+
+                  this.windows.broadcast('file-transfer-progress', {
+                    sessionId,
+                    remotePath: remote,
+                    transferred,
+                    total,
+                  })
+                },
+                // The operator started this, so a macro cancelled earlier on
+                // this session must not abort it.
+                { honourMacroCancel: false }
+              )
+
+              // Auditable like anything else that touched the device. The path
+              // is recorded, never the contents.
+              this.logAudit({
+                userMachine: this.userMachine,
+                sessionId,
+                profileId: session.profile.id!,
+                macroName: 'File download',
+                commands: [`sftp get ${remote} -> ${target.filePath}`],
+                result: 'success',
+              })
+
+              return {
+                success: true,
+                data: { bytes, localPath: target.filePath, remotePath: remote },
+              }
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error)
+
+              this.logAudit({
+                userMachine: this.userMachine,
+                sessionId,
+                profileId: session.profile.id!,
+                macroName: 'File download',
+                commands: [`sftp get ${remote}`],
+                result: 'error',
+                stderrSnippet: message,
+              })
+
+              return { success: false, error: message }
+            }
+          }
+
+          // ---------------------------------------------------- SFTP explorer
+          case 'sftp:list': {
+            try {
+              return {
+                success: true,
+                data: await this.sshManager.listRemoteDirectory(
+                  request.data.sessionId,
+                  request.data.path
+                ),
+              }
+            } catch (error) {
+              return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error),
+              }
+            }
+          }
+
+          case 'sftp:panes':
+            return { success: true, data: { sessionIds: this.sftp.listPanes() } }
+
+          case 'sftp:open-pane':
+            return {
+              success: true,
+              data: { sessionIds: this.sftp.openPane(request.data.sessionId) },
+            }
+
+          case 'sftp:close-pane':
+            return {
+              success: true,
+              data: { sessionIds: this.sftp.closePane(request.data.sessionId) },
+            }
+
+          case 'sftp:enqueue': {
+            const { sessionId, files } = request.data
+            const session = this.sshManager.getSession(sessionId)
+
+            if (!session) return { success: false, error: 'Session not found' }
+
+            // The destination is chosen once, in the system's own picker.
+            // Prompting per file is unusable for a queue, and confining it to
+            // the transfer folder would defeat the point of a file browser —
+            // this is the operator downloading, not a shared button writing.
+            const chosen = await dialog.showOpenDialog(this.mainWindow!, {
+              title: `Save ${files.length} file${files.length === 1 ? '' : 's'} from ${session.profile.name}`,
+              defaultPath: app.getPath('downloads'),
+              properties: ['openDirectory', 'createDirectory'],
+              buttonLabel: 'Save here',
+            })
+
+            if (chosen.canceled || !chosen.filePaths[0]) {
+              return { success: false, error: 'Download cancelled' }
+            }
+
+            const ids = this.sftp.enqueue(sessionId, chosen.filePaths[0], files)
+
+            this.logAudit({
+              userMachine: this.userMachine,
+              sessionId,
+              profileId: session.profile.id!,
+              macroName: 'File download',
+              commands: files.map((file) => `sftp get ${file.remotePath}`),
+              result: 'success',
+            })
+
+            return { success: true, data: { queued: ids.length, directory: chosen.filePaths[0] } }
+          }
+
+          case 'sftp:queue':
+            return { success: true, data: this.sftp.getQueue() }
+
+          case 'sftp:cancel':
+            this.sftp.cancel(request.data.transferId)
+            return { success: true, data: this.sftp.getQueue() }
+
+          case 'sftp:cancel-all':
+            this.sftp.cancelAll()
+            return { success: true, data: this.sftp.getQueue() }
+
+          case 'sftp:clear-finished':
+            this.sftp.clearFinished()
+            return { success: true, data: this.sftp.getQueue() }
+
+          case 'sftp:retry':
+            this.sftp.retry(request.data.transferId)
+            return { success: true, data: this.sftp.getQueue() }
+
+          case 'sftp:reveal': {
+            const transfer = this.sftp
+              .getQueue()
+              .transfers.find((item) => item.id === request.data.transferId)
+
+            if (!transfer || transfer.status !== 'done') {
+              return { success: false, error: 'That download has not finished.' }
+            }
+
+            shell.showItemInFolder(transfer.localPath)
+            return { success: true, data: { revealed: true } }
+          }
 
           // --------------------------------------------------- session logging
           case 'sessions:log-start': {
@@ -1194,6 +1569,8 @@ class SmartcomRevisitedApp {
             return { success: true, data: this.db.getAllSettings() }
 
           case 'settings:save': {
+            const cloudBefore = this.cloudSettings()
+
             for (const [key, value] of Object.entries(request.data)) {
               this.db.setSetting(key as keyof Settings, value)
             }
@@ -1203,6 +1580,30 @@ class SmartcomRevisitedApp {
               directory: updated.sessionLogDir || undefined,
               format: updated.sessionLogFormat,
             })
+
+            // The Settings dialog can change the cloud server and the enabled
+            // flag, and it writes them through this generic path rather than
+            // `cloud:save-settings`. Without this the service keeps the
+            // previous server's binding, and "signed in" would go on being
+            // reported from a credential belonging to a host the app is no
+            // longer talking to.
+            const cloudAfter = this.cloudSettings()
+
+            if (
+              cloudAfter.baseUrl !== cloudBefore.baseUrl ||
+              cloudAfter.enabled !== cloudBefore.enabled
+            ) {
+              await this.cloud.initialize()
+              if (cloudAfter.enabled) void this.cloud.loadAccount()
+            }
+
+            // The interval is a setting, so the timer has to be rebuilt when it
+            // changes — otherwise turning sync down to manual leaves the old
+            // timer running until the app is restarted.
+            if ('cloudSyncIntervalMinutes' in request.data) {
+              this.scheduleSync()
+            }
+
             return { success: true, data: updated }
           }
 
@@ -1548,6 +1949,130 @@ class SmartcomRevisitedApp {
             })
 
             return { success: true, data: { ran: true, requiresConfirmation: false, reasons: [] } }
+          }
+
+          // ------------------------------------------------ SmartCom Cloud
+          //
+          // Nothing below returns a token. `cloud:status` is display data, and
+          // the two billing channels return a URL that is opened in the system
+          // browser — the app renders no payment form, ever.
+          case 'cloud:status':
+            return { success: true, data: this.cloud.getState() }
+
+          case 'cloud:get-settings':
+            return { success: true, data: this.cloudSettings() }
+
+          case 'cloud:save-settings': {
+            const previous = this.cloudSettings()
+            const { enabled, baseUrl, deviceName } = request.data
+
+            if (enabled !== undefined) this.db.setSetting('cloudEnabled', enabled)
+            if (baseUrl !== undefined) this.db.setSetting('cloudBaseUrl', baseUrl.trim())
+            if (deviceName !== undefined) this.db.setSetting('cloudDeviceName', deviceName.trim())
+
+            const current = this.cloudSettings()
+
+            // Changing the server is changing accounts, so the service rebinds
+            // and reads whatever credential belongs to the new host. Turning
+            // the feature on is the one moment it is worth reaching out
+            // unprompted — the panel that follows would only do it anyway.
+            if (current.baseUrl !== previous.baseUrl || current.enabled !== previous.enabled) {
+              await this.cloud.initialize()
+
+              if (current.enabled) void this.cloud.loadAccount()
+            }
+
+            return { success: true, data: current }
+          }
+
+          case 'cloud:sign-in': {
+            const state = await this.cloud.signIn(request.data.email, request.data.password)
+
+            // A sign-in is a security event on this machine, and the audit log
+            // is where an operator looks for those. The address is recorded
+            // because it names the account; the password is not touched, and
+            // no token is written anywhere near this log.
+            this.logAudit({
+              userMachine: this.userMachine,
+              sessionId: 'cloud',
+              macroName: 'SmartCom Cloud sign-in',
+              commands: [`sign-in ${request.data.email} → ${this.cloud.getState().baseUrl}`],
+              result: state.signedIn ? 'success' : 'error',
+              stderrSnippet: state.signedIn ? undefined : state.error.message,
+            })
+
+            return state.signedIn
+              ? { success: true, data: state }
+              : { success: false, error: state.error.message || 'Sign-in failed.' }
+          }
+
+          case 'cloud:sign-out':
+            return { success: true, data: await this.cloud.signOut(request.data.everywhere) }
+
+          case 'cloud:refresh':
+            return { success: true, data: await this.cloud.loadAccount() }
+
+          case 'cloud:devices':
+            return { success: true, data: { devices: await this.cloud.listDevices() } }
+
+          case 'cloud:rename-device': {
+            const device = await this.cloud.renameDevice(request.data.deviceId, request.data.name)
+            return device
+              ? { success: true, data: device }
+              : { success: false, error: this.cloud.getState().error.message || 'Rename failed.' }
+          }
+
+          case 'cloud:revoke-device': {
+            const revoked = await this.cloud.revokeDevice(request.data.deviceId)
+            return revoked
+              ? { success: true, data: { revoked } }
+              : { success: false, error: this.cloud.getState().error.message || 'Revoke failed.' }
+          }
+
+          case 'cloud:checkout': {
+            const url = await this.cloud.checkoutUrl(request.data.plan)
+            if (!url) {
+              return {
+                success: false,
+                error: this.cloud.getState().error.message || 'Could not start checkout.',
+              }
+            }
+
+            await shell.openExternal(url)
+            return { success: true, data: { opened: true } }
+          }
+
+          case 'cloud:portal': {
+            const url = await this.cloud.portalUrl()
+            if (!url) {
+              return {
+                success: false,
+                error: this.cloud.getState().error.message || 'Could not open the billing portal.',
+              }
+            }
+
+            await shell.openExternal(url)
+            return { success: true, data: { opened: true } }
+          }
+
+          case 'cloud:open-signup':
+            await shell.openExternal(this.cloud.signupUrl())
+            return { success: true, data: { opened: true } }
+
+          case 'cloud:sync-status':
+            return { success: true, data: this.sync.getStatus() }
+
+          case 'cloud:sync-now': {
+            const status = await this.sync.syncNow()
+            return status.lastError
+              ? { success: false, error: status.lastError }
+              : { success: true, data: status }
+          }
+
+          case 'cloud:sync-everything': {
+            const queued = this.db.markEverythingDirty()
+            const status = await this.sync.syncNow()
+            return { success: true, data: { queued, status } }
           }
 
           // ------------------------------------------------- detached windows

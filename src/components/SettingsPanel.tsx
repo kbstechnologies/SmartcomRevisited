@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import SecureCrtPanel from './SecureCrtPanel'
 import TldrSettings from './TldrSettings'
+import CloudSettings from './CloudSettings'
 import { useStore } from '../store/useStore'
 import { SettingsSchema } from '@shared/types'
 import type { Settings } from '@shared/types'
@@ -61,6 +62,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     { id: 'terminal', label: 'Terminal', icon: '💻' },
     { id: 'logging', label: 'Logging', icon: '📝' },
     { id: 'tldr', label: 'tldr', icon: '📖' },
+    { id: 'cloud', label: 'Cloud', icon: '☁️' },
     { id: 'security', label: 'Security', icon: '🔒' },
     { id: 'advanced', label: 'Advanced', icon: '🧰' },
   ]
@@ -313,6 +315,10 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
                 {activeTab === 'tldr' && (
                   <TldrSettings values={formData} onChange={handleChange} />
+                )}
+
+                {activeTab === 'cloud' && (
+                  <CloudSettings values={formData} onChange={handleChange} />
                 )}
 
                 {activeTab === 'advanced' && <SecureCrtPanel />}

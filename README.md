@@ -61,11 +61,31 @@ Scripts are built as a stack of coloured blocks (the Flow tab of the button edit
 | **Ask for input** | Pops a form *mid-script*; answers become variables for every later step |
 | **Pause** | Waits for the operator to click Resume |
 | **If prompt … else** | Branches on whether a pattern appears; a timeout takes the else branch |
+| **Start logging** / **Stop logging** | Writes the session output to a file for exactly the part of the script between them |
 | **Run button** | Runs another button's script, passing variables down |
 | **Run button set** | Runs every button in another set, in order |
 | **Exit** | Stops the script; "exit all" also stops the caller |
 
 Any block can be marked *keep going if this step fails*.
+
+**Logging one command instead of a whole session.** Session logging from the
+toolbar starts when you press it, so a config backup arrives buried in the login
+banner and whatever else was on screen. Bracketing the command instead gives a
+file holding that command's output and nothing else:
+
+```
+Start logging   backup-{{SESSION_NAME}}-{{DATE}}.log
+Send text       show running-config
+Wait for prompt #\s*$
+Stop logging
+```
+
+Run that against forty switches with Broadcast on and you get forty named
+config files. The name takes `{{VAR}}`, blank auto-names it, and `{{LOG_PATH}}`
+afterwards holds the file that was written — so the next block can upload or
+collect it. Filenames stay inside the session log folder set in Settings; a
+button cannot write elsewhere on the machine. If the script stops early the log
+is closed for you, and logging you switched on yourself is never touched.
 
 **Button sets install like plugins.** Export a set to a `.json` file and anyone
 can import it: every set and button comes in under a fresh id, name clashes

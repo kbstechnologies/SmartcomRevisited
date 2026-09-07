@@ -25,16 +25,20 @@ import path from 'path'
 const FALLBACK_NAME = 'download'
 
 /**
- * Resolves a local path inside `root`, refusing anything that escapes it.
+ * Resolves a path inside `root`, refusing anything that escapes it.
  *
- * Mirrors `resolveInLibrary` deliberately — one traversal check written twice
- * is how the second one ends up subtly weaker.
+ * The single traversal check for every button-supplied path in the app. It is
+ * one function on purpose: the same check written twice is how the second copy
+ * ends up subtly weaker, and every caller here is handling a path that came out
+ * of a file somebody downloaded from the internet.
  */
-export function resolveInTransferDir(root: string, requested: string): string {
+function confineToDirectory(
+  root: string,
+  requested: string,
+  labels: { folder: string; unconfigured: string }
+): string {
   if (!root) {
-    throw new Error(
-      'No transfer folder is configured. Set one in Settings before a button can upload or download.'
-    )
+    throw new Error(labels.unconfigured)
   }
 
   const normalisedRoot = path.resolve(root)
@@ -45,12 +49,25 @@ export function resolveInTransferDir(root: string, requested: string): string {
   // directory — never a valid file to read or write.
   if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new Error(
-      `"${requested}" is outside the transfer folder. Files must sit under ${normalisedRoot} — ` +
+      `"${requested}" is outside the ${labels.folder}. Files must sit under ${normalisedRoot} — ` +
         'a button cannot reach elsewhere on this machine.'
     )
   }
 
   return target
+}
+
+/**
+ * Resolves a local path inside the transfer folder.
+ *
+ * Mirrors `resolveInLibrary` deliberately.
+ */
+export function resolveInTransferDir(root: string, requested: string): string {
+  return confineToDirectory(root, requested, {
+    folder: 'transfer folder',
+    unconfigured:
+      'No transfer folder is configured. Set one in Settings before a button can upload or download.',
+  })
 }
 
 /**

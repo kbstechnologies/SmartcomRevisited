@@ -1,5 +1,28 @@
 import { Client, ConnectConfig } from 'ssh2'
 import { EventEmitter } from 'events'
+
+/**
+ * Joins two remote path segments.
+ *
+ * Deliberately not `path.join`: on Windows that produces backslashes, and the
+ * far end is a POSIX host that would take `\` as part of a filename rather
+ * than as a separator. Every remote path in this file is POSIX regardless of
+ * what the operator's machine runs.
+ */
+export function joinRemote(base: string, name: string): string {
+  if (name.startsWith('/')) return name
+  return base.endsWith('/') ? `${base}${name}` : `${base}/${name}`
+}
+
+/** The containing directory of a remote path, POSIX-style. */
+export function parentRemote(remotePath: string): string {
+  const trimmed = remotePath.replace(/\/+$/, '')
+  const cut = trimmed.lastIndexOf('/')
+
+  if (cut <= 0) return '/'
+  return trimmed.slice(0, cut)
+}
+
 import { randomBytes } from 'crypto'
 import { createWriteStream, mkdirSync, type WriteStream } from 'fs'
 import { dirname, join } from 'path'
@@ -9,6 +32,7 @@ import { VAULT_SERVICE } from '../src/shared/constants'
 import { preparePaste, trackBracketedPaste } from '../src/shared/paste'
 import { interpolate, resolveFields } from '../src/shared/types'
 import { builtinVariables } from '../src/shared/builtin-vars'
+import { resolveProfileField, resolveProfileVars } from '../src/shared/profile-vars'
 import {
   ensureParentDir,
   formatBytes,
@@ -371,6 +395,142 @@ export class SSHManager extends EventEmitter {
   }
 
   /**
+   * Turns a path into the absolute one the host means by it.
+   *
+   * Used for `.` at the start of a browse, so the explorer opens where an SSH
+   * login lands rather than at `/`. Falls back to the path as given: some
+   * embedded SFTP servers on network gear do not implement `realpath`, and a
+   * file browser that refuses to open because of that would be worse than one
+   * showing a relative path in its bar.
+   */
+  async resolveRemotePath(sessionId: string, remotePath: string): Promise<string> {
+    const session = this.sessions.get(sessionId)
+    if (!session) throw new Error('Session not found')
+
+    const sftp = await this.openSftp(session)
+
+    try {
+      return await new Promise<string>((resolve) => {
+        sftp.realpath(remotePath, (err: Error | undefined, resolved: string) =>
+          resolve(err || !resolved ? remotePath : resolved)
+        )
+      })
+    } finally {
+      sftp.end()
+    }
+  }
+
+  /**
+   * Lists a directory on the host.
+   *
+   * Symlinks are reported as links *and* as whatever they point at where that
+   * can be determined, because on network gear a symlink to a directory is
+   * routinely how the interesting paths are exposed — a browser that treated
+   * every link as a file would refuse to open them.
+   */
+  async listRemoteDirectory(
+    sessionId: string,
+    remotePath: string
+  ): Promise<{
+    path: string
+    entries: Array<{
+      name: string
+      isDirectory: boolean
+      isSymlink: boolean
+      size: number
+      modifiedAt: string | null
+    }>
+  }> {
+    const session = this.sessions.get(sessionId)
+    if (!session) throw new Error('Session not found')
+
+    const resolved = await this.resolveRemotePath(sessionId, remotePath)
+    const sftp = await this.openSftp(session)
+
+    try {
+      const raw: any[] = await new Promise((resolve, reject) => {
+        sftp.readdir(resolved, (err: Error | undefined, list: any[]) =>
+          err
+            ? reject(new Error(`Cannot open ${resolved}: ${err.message}`))
+            : resolve(list ?? [])
+        )
+      })
+
+      const entries = await Promise.all(
+        raw.map(async (item) => {
+          const isSymlink = Boolean(item.attrs?.isSymbolicLink?.())
+          let isDirectory = Boolean(item.attrs?.isDirectory?.())
+
+          // A link's own attributes describe the link, not the target. One
+          // extra stat per link is cheap next to being unable to enter one.
+          if (isSymlink) {
+            isDirectory = await new Promise<boolean>((resolve) => {
+              sftp.stat(joinRemote(resolved, item.filename), (err: Error | undefined, s: any) =>
+                resolve(err ? false : Boolean(s?.isDirectory?.()))
+              )
+            })
+          }
+
+          return {
+            name: String(item.filename),
+            isDirectory,
+            isSymlink,
+            size: Number(item.attrs?.size ?? 0),
+            modifiedAt: item.attrs?.mtime
+              ? new Date(item.attrs.mtime * 1000).toISOString()
+              : null,
+          }
+        })
+      )
+
+      // Folders first, then by name. `localeCompare` with `numeric` so
+      // `log10` sorts after `log9`, which is what anybody looking at a list of
+      // rotated logs expects.
+      entries.sort((a, b) => {
+        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      })
+
+      return { path: resolved, entries }
+    } finally {
+      sftp.end()
+    }
+  }
+
+  /**
+   * Asks the host about a file without fetching it.
+   *
+   * Exists so a manual download can find out whether the file is there
+   * *before* asking where to save it. Choosing a destination and only then
+   * being told the path was wrong is a pointless round of a file dialog, and
+   * the size is worth knowing up front too — "that is 4 GB" is something an
+   * operator on a slow link would rather learn before starting.
+   */
+  async statRemoteFile(
+    sessionId: string,
+    remotePath: string
+  ): Promise<{ size: number; isDirectory: boolean }> {
+    const session = this.sessions.get(sessionId)
+    if (!session) throw new Error('Session not found')
+
+    const sftp = await this.openSftp(session)
+
+    try {
+      const stats: any = await new Promise((resolve, reject) => {
+        sftp.stat(remotePath, (err: Error | undefined, result: any) =>
+          err
+            ? reject(new Error(`${remotePath} is not readable on the host: ${err.message}`))
+            : resolve(result)
+        )
+      })
+
+      return { size: stats.size ?? 0, isDirectory: Boolean(stats.isDirectory?.()) }
+    } finally {
+      sftp.end()
+    }
+  }
+
+  /**
    * Fetches a file from the host.
    *
    * `fastGet` rather than a stream so ssh2 pipelines the reads — a capture file
@@ -381,8 +541,31 @@ export class SSHManager extends EventEmitter {
     sessionId: string,
     remotePath: string,
     localPath: string,
-    onProgress?: (transferred: number, total: number) => void
+    onProgress?: (transferred: number, total: number) => void,
+    options: {
+      /**
+       * Whether an outstanding macro cancellation aborts this transfer.
+       *
+       * True for a `download` step, which belongs to the run being cancelled.
+       * **False for a transfer the operator started themselves**: the cancel
+       * flag is cleared when the *next* macro starts, not when one is
+       * cancelled, so a manual download begun after cancelling a macro would
+       * otherwise die instantly with "Macro cancelled" — a message about
+       * something the operator is not doing.
+       */
+      honourMacroCancel?: boolean
+      /**
+       * Asked on every chunk. Returning true aborts the transfer.
+       *
+       * How the download queue cancels one item without touching anything else
+       * on the session — `cancelledRuns` is per session and would stop a macro
+       * as well.
+       */
+      shouldCancel?: () => boolean
+    } = {}
   ): Promise<{ bytes: number }> {
+    const { honourMacroCancel = true, shouldCancel } = options
+
     const session = this.sessions.get(sessionId)
     if (!session) throw new Error('Session not found')
 
@@ -411,8 +594,12 @@ export class SSHManager extends EventEmitter {
             step: (transferred: number) => {
               // Cancelling has to reach a transfer that may run for minutes;
               // the step callback is the only place the engine gets a look in.
-              if (this.cancelledRuns.has(sessionId)) {
+              if (honourMacroCancel && this.cancelledRuns.has(sessionId)) {
                 reject(new Error('Macro cancelled'))
+                return
+              }
+              if (shouldCancel?.()) {
+                reject(new Error('Cancelled'))
                 return
               }
               onProgress?.(transferred, total)
@@ -553,7 +740,19 @@ export class SSHManager extends EventEmitter {
   }
 
   /** Routes to the right transport. Everything downstream is identical. */
-  async createSession(profile: Profile, options: { autoLog?: boolean } = {}): Promise<string> {
+  async createSession(stored: Profile, options: { autoLog?: boolean } = {}): Promise<string> {
+    // Substituted once, here, before anything branches on transport. Every
+    // consumer downstream — the tab title, the session log header, the audit
+    // row, the `{{SESSION_HOST}}` built-in — reads `session.profile`, so
+    // resolving at the one entry point is what keeps them all agreeing. Nothing
+    // writes `session.profile` back to the database, so the saved connection
+    // keeps its `{{NAME}}` and resolves again on the next connect.
+    //
+    // This throws rather than connecting when a name is not in the globals
+    // file — see the note at the top of profile-vars.ts. `sessions:open` and
+    // `sessions:open-many` both turn that into the operator's error message.
+    const profile = resolveProfileVars(stored, this.globalVariables())
+
     if (profile.transport === 'serial') return this.createSerialSession(profile, options)
     if (profile.transport === 'local') return this.createLocalSession(profile, options)
     return this.createSshSession(profile, options)
@@ -917,7 +1116,17 @@ export class SSHManager extends EventEmitter {
     if (profile.authMethod === 'password') {
       const password = await keytar.getPassword(VAULT_SERVICE, `${profile.id}:password`)
       if (password) {
-        config.password = password
+        // Resolved here rather than in `createSession` with the other fields
+        // because the password is not on the profile — it is in the OS
+        // keychain, and this is the only place it is read.
+        //
+        // A stored password of `{{NAME}}` means the real secret lives in the
+        // globals file, which is plain text on disk. That is a deliberate
+        // trade the operator makes per connection; the form says so where the
+        // choice is made. What is not negotiable is the failure mode: an
+        // unresolved name must never be sent as the literal password, so
+        // `resolveProfileField` throws instead.
+        config.password = resolveProfileField('password', password, this.globalVariables())
       }
     } else if (profile.authMethod === 'key') {
       // A managed key (stored in the encrypted vault) wins over a file path.
@@ -1235,6 +1444,10 @@ export class SSHManager extends EventEmitter {
       lastActivity: session.lastActivity.toISOString(),
       error: session.error,
       logPath: session.log?.path,
+      // Carried on the session so the renderer can tell whether SFTP is
+      // possible without going back to the profile — which may have been
+      // edited or deleted since this session was opened.
+      transport: session.profile.transport,
     }))
   }
 
@@ -1909,7 +2122,15 @@ export class SSHManager extends EventEmitter {
 
     // Awaited outside the executor so a rejection here cannot be swallowed.
     try {
-      const connectConfig = await this.buildConnectConfig(profile)
+      // Resolved here as well as in `createSession`, and only once on each
+      // path: Test and Connect have to agree, and a Test that dialled the
+      // literal `{{SITE_CORE}}` would report the connection broken when it is
+      // fine. `resolveProfileVars` throws for a name the globals file does not
+      // have, which the catch below turns into the Test result — the right
+      // place for that message, since the form is already open.
+      const connectConfig = await this.buildConnectConfig(
+        resolveProfileVars(profile, this.globalVariables())
+      )
       client.on('ready', () => finish({ success: true }))
       client.on('error', (err) => finish({ success: false, error: err.message }))
       client.connect(connectConfig)

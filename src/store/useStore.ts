@@ -19,9 +19,12 @@ import type {
   LocalShellInfo,
   ScriptEntry,
 } from '@shared/types'
+import { builtinVariables } from '@shared/builtin-vars'
 import type { AiSettings, AiAsk, AiStreamEvent, AssistantTurn } from '@shared/ai'
 import type { GlobalVar, GlobalVarProblem } from '@shared/global-vars'
 import type { TldrCacheStatus, TldrPage, TldrPlatform, TldrSearchResult } from '@shared/tldr'
+import type { CloudDevice, CloudState, SyncStatus } from '@shared/cloud'
+import type { SftpListing, SftpQueueState } from '@shared/sftp'
 
 /** A macro in flight, as reported by the main process. */
 export interface RunningMacro {
@@ -62,7 +65,15 @@ export interface PendingConfirmRequest {
 }
 
 /** Modal dialogs that can be opened from more than one place. */
-export type AppDialog = 'keys' | 'settings' | 'logs' | 'about' | 'scripts' | 'globals' | null
+export type AppDialog =
+  | 'keys'
+  | 'settings'
+  | 'logs'
+  | 'about'
+  | 'scripts'
+  | 'globals'
+  | 'cloud'
+  | null
 
 /**
  * Which tab the right-hand panel is showing.
@@ -185,6 +196,20 @@ interface AppStore {
   tldrSearchOpen: boolean
 
   /**
+   * SmartCom Cloud account state, mirrored from the main process.
+   *
+   * Null until the first read, and null forever on a main process that has no
+   * cloud service — which the panel reads as "unavailable" and says so rather
+   * than showing an empty account. **This never contains a token**: the main
+   * process keeps access tokens in memory and refresh tokens in the OS
+   * keystore, and sends only what a panel needs to draw.
+   */
+  cloudState: CloudState | null
+
+  /** Sync progress, mirrored from the main process's push. */
+  cloudSyncStatus: SyncStatus | null
+
+  /**
    * The scratch pad: somewhere to park text between two terminals.
    *
    * Held here and **nowhere else**. It is not a setting, it is not in the
@@ -198,6 +223,34 @@ interface AppStore {
    * on disk would be a worse feature than no notepad.
    */
   scratchpad: string
+
+  /**
+   * Values the operator has typed for `{{name}}`s the scratch pad did not
+   * recognise — neither a global nor a built-in.
+   *
+   * Keyed by name and kept across edits on purpose: staging is iterative, and
+   * retyping the same interface number after every tweak to the text is the
+   * thing that would make the feature not worth using. Cleared with the pad.
+   */
+  prestageAnswers: Record<string, string>
+
+  /**
+   * The built-in variables the scratch pad is currently resolving against —
+   * `{{DATE}}`, `{{EPOCH}}`, `{{RANDOM}}` and the rest — frozen rather than
+   * recomputed.
+   *
+   * This is the same rule `builtinVariables()` documents, applied to a panel
+   * instead of a macro run: the value shown in the preview must be the value
+   * that reaches the terminal. Recomputing per render would also re-roll
+   * `{{RANDOM}}` on every keystroke, so a filename staged in two places would
+   * disagree with itself. `rerollPrestageBuiltins` is the deliberate way to
+   * get a fresh set.
+   *
+   * The session-derived ones (`SESSION_HOST` and friends) are *not* in here —
+   * they are merged in live from whichever session is in front, because
+   * following the focused terminal is the whole point of them.
+   */
+  prestageBuiltins: Record<string, string>
 
   // Data
   profiles: Profile[]
@@ -243,6 +296,46 @@ interface AppStore {
   loadGlobalVars: () => Promise<void>
   saveGlobalVars: (text: string) => Promise<GlobalVarsState>
   revealGlobalVars: () => Promise<void>
+  /**
+   * The SFTP explorer.
+   *
+   * `sftpPanes` is the list of sessions with an explorer open, and it is kept
+   * in the main process rather than here so a pane survives being popped out —
+   * a detached window is handed pane ids in its query string and has to be able
+   * to render an explorer knowing nothing else.
+   */
+  sftpPanes: string[]
+  /** The download queue, mirrored from the main process's push. */
+  sftpQueue: SftpQueueState
+  setSftpPanes: (sessionIds: string[]) => void
+  setSftpQueue: (queue: SftpQueueState) => void
+  loadSftpState: () => Promise<void>
+  openSftpPane: (sessionId: string) => Promise<void>
+  closeSftpPane: (sessionId: string) => Promise<void>
+  sftpList: (sessionId: string, path: string) => Promise<SftpListing>
+  /** Opens the folder picker, then queues. Throws if cancelled or refused. */
+  sftpEnqueue: (
+    sessionId: string,
+    files: Array<{ remotePath: string; name: string; size: number }>
+  ) => Promise<{ queued: number; directory: string }>
+  sftpCancel: (transferId: string) => Promise<void>
+  sftpCancelAll: () => Promise<void>
+  sftpClearFinished: () => Promise<void>
+  sftpRetry: (transferId: string) => Promise<void>
+  sftpReveal: (transferId: string) => Promise<void>
+
+  /**
+   * Fetches one file from the host over SFTP.
+   *
+   * Throws on failure rather than swallowing: the reason is always something
+   * the operator needs to read — no such file, no SFTP subsystem on the
+   * device, or they cancelled the save dialog.
+   */
+  downloadFile: (
+    sessionId: string,
+    remotePath: string
+  ) => Promise<{ bytes: number; localPath: string; remotePath: string }>
+
   runScriptOnSession: (params: {
     sessionId: string
     path: string
@@ -258,6 +351,33 @@ interface AppStore {
   setAssistantPrefill: (prompt: string | null) => void
 
   setScratchpad: (text: string) => void
+  setPrestageAnswer: (name: string, value: string) => void
+  clearPrestage: () => void
+  rerollPrestageBuiltins: () => void
+
+  // SmartCom Cloud — the optional account.
+  //
+  // Every one of these is a thin pass-through to the main process, which owns
+  // all network access. None of them can fail in a way that matters to the
+  // terminal.
+  setCloudState: (state: CloudState) => void
+  loadCloudState: () => Promise<void>
+  cloudSaveSettings: (
+    patch: Partial<{ enabled: boolean; baseUrl: string; deviceName: string }>
+  ) => Promise<void>
+  cloudSignIn: (email: string, password: string) => Promise<void>
+  cloudSignOut: (everywhere?: boolean) => Promise<void>
+  cloudRefresh: () => Promise<void>
+  cloudDevices: () => Promise<CloudDevice[]>
+  cloudRenameDevice: (deviceId: string, name: string) => Promise<void>
+  cloudRevokeDevice: (deviceId: string) => Promise<void>
+  cloudCheckout: (plan: string) => Promise<void>
+  cloudPortal: () => Promise<void>
+  cloudOpenSignup: () => Promise<void>
+  setCloudSyncStatus: (status: SyncStatus) => void
+  loadCloudSyncStatus: () => Promise<void>
+  cloudSyncNow: () => Promise<void>
+  cloudSyncEverything: () => Promise<void>
 
   // tldr command intelligence
   setSidePanel: (panel: SidePanel) => void
@@ -482,8 +602,16 @@ const useStore = create<AppStore>((set, get) => ({
   sidePanel: 'buttons',
   tldrRequest: null,
   tldrStatus: null,
+  cloudState: null,
+  cloudSyncStatus: null,
+  sftpPanes: [],
+  sftpQueue: { transfers: [], active: false },
   tldrSearchOpen: false,
   scratchpad: '',
+  prestageAnswers: {},
+  // Rolled once at startup, and only ever replaced wholesale — see the note on
+  // the field. Session values are not part of the snapshot.
+  prestageBuiltins: builtinVariables(),
   profiles: [],
   sessions: [],
   macros: [],
@@ -599,6 +727,66 @@ const useStore = create<AppStore>((set, get) => ({
     await invoke('globals:reveal')
   },
 
+  // ------------------------------------------------------------------- sftp
+  setSftpPanes: (sftpPanes) => set({ sftpPanes }),
+  setSftpQueue: (sftpQueue) => set({ sftpQueue }),
+
+  loadSftpState: async () => {
+    try {
+      const [panes, queue] = await Promise.all([
+        invoke<{ sessionIds: string[] }>('sftp:panes'),
+        invoke<SftpQueueState>('sftp:queue'),
+      ])
+      set({ sftpPanes: panes.sessionIds, sftpQueue: queue })
+    } catch {
+      // An older main process with no SFTP service. The explorer simply does
+      // not appear rather than the workspace failing to render.
+    }
+  },
+
+  openSftpPane: async (sessionId) => {
+    const { sessionIds } = await invoke<{ sessionIds: string[] }>('sftp:open-pane', { sessionId })
+    set({ sftpPanes: sessionIds })
+  },
+
+  closeSftpPane: async (sessionId) => {
+    const { sessionIds } = await invoke<{ sessionIds: string[] }>('sftp:close-pane', { sessionId })
+    set({ sftpPanes: sessionIds })
+  },
+
+  // Throws on failure: "cannot open that directory" is the answer to what the
+  // person just asked, and the explorer shows it in place of the listing.
+  sftpList: async (sessionId, path) => invoke<SftpListing>('sftp:list', { sessionId, path }),
+
+  sftpEnqueue: async (sessionId, files) =>
+    invoke<{ queued: number; directory: string }>('sftp:enqueue', { sessionId, files }),
+
+  sftpCancel: async (transferId) => {
+    set({ sftpQueue: await invoke<SftpQueueState>('sftp:cancel', { transferId }) })
+  },
+
+  sftpCancelAll: async () => {
+    set({ sftpQueue: await invoke<SftpQueueState>('sftp:cancel-all') })
+  },
+
+  sftpClearFinished: async () => {
+    set({ sftpQueue: await invoke<SftpQueueState>('sftp:clear-finished') })
+  },
+
+  sftpRetry: async (transferId) => {
+    set({ sftpQueue: await invoke<SftpQueueState>('sftp:retry', { transferId }) })
+  },
+
+  sftpReveal: async (transferId) => {
+    await invoke('sftp:reveal', { transferId })
+  },
+
+  downloadFile: async (sessionId, remotePath) =>
+    invoke<{ bytes: number; localPath: string; remotePath: string }>('sessions:download-file', {
+      sessionId,
+      remotePath,
+    }),
+
   runScriptOnSession: async (params) =>
     invoke<{ remotePath: string; command: string }>('scripts:run', params),
 
@@ -614,6 +802,101 @@ const useStore = create<AppStore>((set, get) => ({
   setAssistantPrefill: (assistantPrefill) => set({ assistantPrefill }),
 
   setScratchpad: (scratchpad) => set({ scratchpad }),
+
+  setPrestageAnswer: (name, value) =>
+    set((state) => ({ prestageAnswers: { ...state.prestageAnswers, [name]: value } })),
+
+  // Clearing the pad clears the answers with it. They are answers *to* that
+  // text; leaving them behind would silently fill in a name in the next thing
+  // staged, which is the one way this feature could send something unread.
+  clearPrestage: () => set({ scratchpad: '', prestageAnswers: {} }),
+
+  rerollPrestageBuiltins: () => set({ prestageBuiltins: builtinVariables() }),
+
+  // ------------------------------------------------------------------ cloud
+  //
+  // Reads swallow their errors and leave the last known state in place: the
+  // account panel is not worth an error boundary, and a main process without a
+  // cloud service must not break a window that merely asked.
+  setCloudState: (cloudState) => set({ cloudState }),
+
+  loadCloudState: async () => {
+    try {
+      set({ cloudState: await invoke<CloudState>('cloud:status') })
+    } catch {
+      // An older main process. The panel reads null as "unavailable".
+    }
+  },
+
+  cloudSaveSettings: async (patch) => {
+    await invoke('cloud:save-settings', patch)
+    await get().loadCloudState()
+  },
+
+  // Writes deliberately do *not* swallow: a failed sign-in has a message the
+  // person typing needs to read, and the panel catches it to show it.
+  cloudSignIn: async (email, password) => {
+    set({ cloudState: await invoke<CloudState>('cloud:sign-in', { email, password }) })
+  },
+
+  cloudSignOut: async (everywhere = false) => {
+    set({ cloudState: await invoke<CloudState>('cloud:sign-out', { everywhere }) })
+  },
+
+  cloudRefresh: async () => {
+    set({ cloudState: await invoke<CloudState>('cloud:refresh') })
+  },
+
+  cloudDevices: async () => {
+    const { devices } = await invoke<{ devices: CloudDevice[] }>('cloud:devices')
+    return devices
+  },
+
+  cloudRenameDevice: async (deviceId, name) => {
+    await invoke('cloud:rename-device', { deviceId, name })
+    await get().loadCloudState()
+  },
+
+  cloudRevokeDevice: async (deviceId) => {
+    await invoke('cloud:revoke-device', { deviceId })
+    await get().loadCloudState()
+  },
+
+  // The main process opens the URL in the system browser; nothing is rendered
+  // in the app. There is no payment form in this application and never will be.
+  cloudCheckout: async (plan) => {
+    await invoke('cloud:checkout', { plan })
+  },
+
+  cloudPortal: async () => {
+    await invoke('cloud:portal')
+  },
+
+  cloudOpenSignup: async () => {
+    await invoke('cloud:open-signup')
+  },
+
+  setCloudSyncStatus: (cloudSyncStatus) => set({ cloudSyncStatus }),
+
+  loadCloudSyncStatus: async () => {
+    try {
+      set({ cloudSyncStatus: await invoke<SyncStatus>('cloud:sync-status') })
+    } catch {
+      // An older main process with no sync service. Null reads as unavailable.
+    }
+  },
+
+  // These two throw on failure on purpose: the panel shows the reason, and a
+  // sync that silently did nothing is worse than one that says why.
+  cloudSyncNow: async () => {
+    await invoke('cloud:sync-now')
+    await get().loadCloudSyncStatus()
+  },
+
+  cloudSyncEverything: async () => {
+    await invoke('cloud:sync-everything')
+    await get().loadCloudSyncStatus()
+  },
 
   // ------------------------------------------------------------------- tldr
   setSidePanel: (sidePanel) => set({ sidePanel }),

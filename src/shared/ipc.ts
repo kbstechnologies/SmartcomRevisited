@@ -113,6 +113,88 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
     data: z.object({ sessionId: z.string(), cols: z.number(), rows: z.number() }),
   }),
 
+  /**
+   * Fetches one file from the host over SFTP, for the operator rather than for
+   * a button.
+   *
+   * `remotePath` is typed by the person at the keyboard, and where it lands is
+   * chosen in the system's own save dialog — so unlike the `download` macro
+   * step this is **not** confined to the transfer folder. The confinement in
+   * `file-transfer.ts` exists because a button from the exchange supplies its
+   * own paths; here both ends are the operator's deliberate choice in the
+   * moment, which is the same trust model as any browser download.
+   */
+  z.object({
+    channel: z.literal('sessions:download-file'),
+    data: z.object({
+      sessionId: z.string(),
+      /** Absolute or relative to the login directory, as SFTP resolves it. */
+      remotePath: z.string().min(1).max(4096),
+    }),
+  }),
+
+  // SFTP explorer and download queue.
+  //
+  // Browsing is a question with an immediate answer; a download is work that
+  // outlives the panel that started it. So the queue lives in the main process
+  // and every window watches it — closing the explorer does not cancel a
+  // transfer, and the same queue is visible wherever it is looked at.
+  z.object({
+    channel: z.literal('sftp:list'),
+    data: z.object({
+      sessionId: z.string(),
+      /** `.` opens where an SSH login lands rather than at the root. */
+      path: z.string().default('.'),
+    }),
+  }),
+  /** Which sessions have an explorer pane open. Shared so pop-out works. */
+  z.object({ channel: z.literal('sftp:panes'), data: z.any().optional() }),
+  z.object({
+    channel: z.literal('sftp:open-pane'),
+    data: z.object({ sessionId: z.string() }),
+  }),
+  z.object({
+    channel: z.literal('sftp:close-pane'),
+    data: z.object({ sessionId: z.string() }),
+  }),
+  /**
+   * Queues files. The destination folder is chosen once in the system's own
+   * picker — per-file prompting is unusable for a queue, and confining it to
+   * the transfer folder would defeat the point of a browser.
+   */
+  z.object({
+    channel: z.literal('sftp:enqueue'),
+    data: z.object({
+      sessionId: z.string(),
+      files: z
+        .array(
+          z.object({
+            remotePath: z.string().min(1).max(4096),
+            name: z.string().min(1).max(512),
+            size: z.number().min(0).default(0),
+          })
+        )
+        .min(1)
+        .max(500),
+    }),
+  }),
+  z.object({ channel: z.literal('sftp:queue'), data: z.any().optional() }),
+  z.object({
+    channel: z.literal('sftp:cancel'),
+    data: z.object({ transferId: z.string() }),
+  }),
+  z.object({ channel: z.literal('sftp:cancel-all'), data: z.any().optional() }),
+  z.object({ channel: z.literal('sftp:clear-finished'), data: z.any().optional() }),
+  z.object({
+    channel: z.literal('sftp:retry'),
+    data: z.object({ transferId: z.string() }),
+  }),
+  /** Opens a completed download in the system file manager. */
+  z.object({
+    channel: z.literal('sftp:reveal'),
+    data: z.object({ transferId: z.string() }),
+  }),
+
   // PuTTY-style session logging
   z.object({
     channel: z.literal('sessions:log-start'),
@@ -333,6 +415,73 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
     }),
   }),
 
+  // SmartCom Cloud — the optional account.
+  //
+  // Every channel here answers with display data. **No token ever crosses this
+  // boundary**: access tokens live in the main process's memory, refresh tokens
+  // in the OS keystore, and `cloud:status` is names, dates and plan labels. A
+  // compromised renderer gets nothing it could replay.
+  //
+  // `cloud:checkout` and `cloud:portal` return a URL for the main process to
+  // open in the system browser. The app never renders a payment form — that is
+  // the same rule the website follows, and it matters more here, since a card
+  // number inside an Electron renderer would be a card number in a desktop
+  // application's memory for no benefit at all.
+  z.object({ channel: z.literal('cloud:status'), data: z.any().optional() }),
+  z.object({ channel: z.literal('cloud:get-settings'), data: z.any().optional() }),
+  z.object({
+    channel: z.literal('cloud:save-settings'),
+    data: z.object({
+      enabled: z.boolean().optional(),
+      baseUrl: z.string().optional(),
+      deviceName: z.string().optional(),
+    }),
+  }),
+  z.object({
+    channel: z.literal('cloud:sign-in'),
+    data: z.object({ email: z.string().email(), password: z.string().min(1) }),
+  }),
+  z.object({
+    channel: z.literal('cloud:sign-out'),
+    data: z.object({ everywhere: z.boolean().default(false) }).default({ everywhere: false }),
+  }),
+  /** Re-reads the account from the server. The panel's refresh button. */
+  z.object({ channel: z.literal('cloud:refresh'), data: z.any().optional() }),
+  z.object({ channel: z.literal('cloud:devices'), data: z.any().optional() }),
+  z.object({
+    channel: z.literal('cloud:rename-device'),
+    data: z.object({ deviceId: z.string().min(1), name: z.string().min(1).max(100) }),
+  }),
+  /**
+   * Ends a device's cloud access. Not a remote wipe — the machine keeps every
+   * host, button and script it has and goes on working offline.
+   */
+  z.object({
+    channel: z.literal('cloud:revoke-device'),
+    data: z.object({ deviceId: z.string().min(1) }),
+  }),
+  z.object({
+    channel: z.literal('cloud:checkout'),
+    data: z.object({ plan: z.string().min(1) }),
+  }),
+  z.object({ channel: z.literal('cloud:portal'), data: z.any().optional() }),
+  /** Opens the website's registration page. Sign-up is never proxied through the API. */
+  z.object({ channel: z.literal('cloud:open-signup'), data: z.any().optional() }),
+
+  // Sync. Reads are cheap; `cloud:sync-now` is the only one that acts, and it
+  // is single-flight in the main process — pressing the button twice joins the
+  // run already going rather than starting a second.
+  z.object({ channel: z.literal('cloud:sync-status'), data: z.any().optional() }),
+  z.object({ channel: z.literal('cloud:sync-now'), data: z.any().optional() }),
+  /**
+   * Queues every local object for upload.
+   *
+   * The first sync of an install that already has data, and the repair path
+   * when a machine is linked to a different workspace. It only marks things as
+   * needing to be sent — it changes no data and deletes nothing.
+   */
+  z.object({ channel: z.literal('cloud:sync-everything'), data: z.any().optional() }),
+
   // Detached terminal windows
   z.object({
     channel: z.literal('windows:detach'),
@@ -391,8 +540,25 @@ export const EVENT_CHANNELS = [
   'macro-form-request',
   'macro-confirm-request',
   'ai-stream',
+  /**
+   * Progress of a manual SFTP download. A capture file is routinely hundreds
+   * of megabytes, so a transfer with no feedback looks like a hung app.
+   */
+  'file-transfer-progress',
+  /** The whole download queue, whenever anything in it moves. */
+  'sftp-queue-changed',
+  /** Which sessions have an explorer open — so a pane survives a pop-out. */
+  'sftp-panes-changed',
   /** tldr cache state: download progress, index rebuilds, failures. */
   'tldr-status',
+  /**
+   * Account state: signed in or out, plan, last error. Pushed rather than
+   * polled because a token rotation can sign a machine out between one panel
+   * open and the next, and every window has to agree about that.
+   */
+  'cloud-status',
+  /** Sync progress and its last error, pushed as a run starts and finishes. */
+  'cloud-sync-status',
   'active-session-changed',
   'session-placement-changed',
   'update-status',

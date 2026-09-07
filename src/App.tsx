@@ -158,7 +158,19 @@ function App() {
     window.electronAPI.on('session-status-changed', onStatus)
     window.electronAPI.on('active-session-changed', onActiveSession)
     window.electronAPI.on('session-placement-changed', onPlacement)
+    // A token rotation can sign this machine out between one panel open and
+    // the next, and every window has to agree about that — including a
+    // detached one that never opened the account panel.
+    const onCloudStatus = (state: any) => useStore.getState().setCloudState(state)
+    const onCloudSyncStatus = (status: any) => useStore.getState().setCloudSyncStatus(status)
+    const onSftpQueue = (queue: any) => useStore.getState().setSftpQueue(queue)
+    const onSftpPanes = (payload: any) => useStore.getState().setSftpPanes(payload.sessionIds ?? [])
+
     window.electronAPI.on('tldr-status', onTldrStatus)
+    window.electronAPI.on('cloud-status', onCloudStatus)
+    window.electronAPI.on('cloud-sync-status', onCloudSyncStatus)
+    window.electronAPI.on('sftp-queue-changed', onSftpQueue)
+    window.electronAPI.on('sftp-panes-changed', onSftpPanes)
 
     return () => {
       window.electronAPI.off('session-log-changed', onLogChanged)
@@ -170,6 +182,10 @@ function App() {
       window.electronAPI.off('active-session-changed', onActiveSession)
       window.electronAPI.off('session-placement-changed', onPlacement)
       window.electronAPI.off('tldr-status', onTldrStatus)
+      window.electronAPI.off('cloud-status', onCloudStatus)
+      window.electronAPI.off('cloud-sync-status', onCloudSyncStatus)
+      window.electronAPI.off('sftp-queue-changed', onSftpQueue)
+      window.electronAPI.off('sftp-panes-changed', onSftpPanes)
     }
   }, [])
 

@@ -36,4 +36,19 @@ describe('selectVisibleSession', () => {
   it('follows focus within a single window', () => {
     expect(selectVisibleSession(['a', 'b'], 'a', 'b')).toBe('a')
   })
+
+  it('shows a file browser the user clicked, not its terminal', () => {
+    // Both panes belong to the same session, so the global focus (which names
+    // a session, never a pane) cannot break the tie. Before this, clicking the
+    // browser tab did nothing: the terminal matched first and won every render.
+    expect(selectVisibleSession(['a', 'sftp:a'], 'a', 'sftp:a')).toBe('sftp:a')
+  })
+
+  it('leaves a file browser when focus moves to another session here', () => {
+    expect(selectVisibleSession(['a', 'sftp:a', 'b'], 'b', 'sftp:a')).toBe('b')
+  })
+
+  it('keeps a detached file browser visible when the main window takes focus', () => {
+    expect(selectVisibleSession(['sftp:a'], 'main-session', 'sftp:a')).toBe('sftp:a')
+  })
 })

@@ -7,6 +7,11 @@ import TagEditor from './TagEditor'
 import { sharedTags } from '../lib/setVisibility'
 import { VAULT_SERVICE } from '@shared/constants'
 import {
+  inspectProfileField,
+  resolveProfileField,
+  type ProfileVarField,
+} from '@shared/profile-vars'
+import {
   COMMON_BAUD_RATES,
   SERIAL_FLOW_CONTROL,
   SERIAL_PARITIES,
@@ -20,6 +25,63 @@ interface ProfileFormProps {
   profile?: Profile | null
   onClose: () => void
   onSave: () => void
+}
+
+/**
+ * What a box containing `{{NAME}}` will actually be when you connect.
+ *
+ * Shown rather than left to be discovered, because the failure it prevents is
+ * expensive: a connection is saved, works for a month, and then somebody
+ * renames a variable in the globals file and every connection using it stops —
+ * with an error at connect time rather than here, where the fix is.
+ *
+ * Nothing at all when the box holds no variables, which is almost every
+ * connection; this must not add a line of chrome to the ordinary case.
+ */
+function VarHint({
+  field,
+  value,
+  globals,
+  secret = false,
+}: {
+  field: ProfileVarField
+  value: string
+  globals: Record<string, string>
+  /** True for the password, whose resolved value must never be rendered. */
+  secret?: boolean
+}) {
+  const { names, missing } = inspectProfileField(value, globals)
+  if (names.length === 0) return null
+
+  if (missing.length > 0) {
+    return (
+      <p className="mt-1 text-xs text-amber-300">
+        {missing.map((name) => `{{${name}}}`).join(', ')}{' '}
+        {missing.length === 1 ? 'is' : 'are'} not in your global variables file — connecting will
+        stop here rather than guess.
+      </p>
+    )
+  }
+
+  // For the password the *names* resolve, and that is all this may say. The
+  // point of putting a secret in the globals file is that it is not on screen;
+  // echoing it back under the box would undo that in the one place somebody
+  // else is most likely to be looking over a shoulder.
+  return (
+    <p className="mt-1 text-xs text-gray-400">
+      {secret ? (
+        <>
+          Reads {names.map((name) => `{{${name}}}`).join(', ')} from your global variables file,
+          which is <span className="text-amber-300">plain text on disk</span> — unlike a password
+          typed here, which goes to the operating system&rsquo;s keychain.
+        </>
+      ) : (
+        <>
+          Connects as <span className="font-mono text-gray-200">{resolveProfileField(field, value, globals)}</span>
+        </>
+      )}
+    </p>
+  )
 }
 
 /** Form state mirrors Profile plus the two write-only secret fields. */
@@ -64,7 +126,9 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
   const macroSets = useStore((state) => state.macroSets)
   const groups = useStore((state) => state.connectionGroups)
   const profiles = useStore((state) => state.profiles)
+  const globalVars = useStore((state) => state.globalVars)
   const loadSshKeys = useStore((state) => state.loadSshKeys)
+  const loadGlobalVars = useStore((state) => state.loadGlobalVars)
   const loadConnectionGroups = useStore((state) => state.loadConnectionGroups)
   const listSerialPorts = useStore((state) => state.listSerialPorts)
   const listLocalShells = useStore((state) => state.listLocalShells)
@@ -92,7 +156,18 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
   useEffect(() => {
     void loadSshKeys()
     void loadConnectionGroups()
-  }, [loadSshKeys, loadConnectionGroups])
+    // Re-read rather than trust what was loaded at startup: the globals file is
+    // the user's, editable in their own editor, and a hint under a box is only
+    // worth showing if it is current.
+    void loadGlobalVars()
+  }, [loadSshKeys, loadConnectionGroups, loadGlobalVars])
+
+  /** `NAME` -> value, for the hints under Name, Host, Username and Password. */
+  const globals = useMemo(() => {
+    const values: Record<string, string> = {}
+    for (const entry of globalVars.vars) values[entry.name] = entry.value
+    return values
+  }, [globalVars.vars])
 
   const scanPorts = async () => {
     setScanning(true)
@@ -288,6 +363,7 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
                 }
                 className={inputClass}
               />
+              <VarHint field="name" value={form.name} globals={globals} />
             </div>
             <div className="w-44">
               <label className={labelClass}>Group</label>
@@ -528,6 +604,7 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
                     placeholder="10.0.0.1"
                     className={inputClass}
                   />
+                  <VarHint field="host" value={form.host} globals={globals} />
                 </div>
                 <div className="w-24">
                   <label className={labelClass}>Port</label>
@@ -547,6 +624,7 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
                   onChange={(event) => update('username', event.target.value)}
                   className={inputClass}
                 />
+                <VarHint field="username" value={form.username} globals={globals} />
               </div>
 
               <div>
@@ -576,6 +654,7 @@ export default function ProfileForm({ profile, onClose, onSave }: ProfileFormPro
                     onChange={(event) => update('password', event.target.value)}
                     className={inputClass}
                   />
+                  <VarHint field="password" value={form.password} globals={globals} secret />
                 </div>
               )}
 

@@ -678,6 +678,218 @@ app.on('ready', () => {
     return 'unversioned → 1.1.0, snapshot written'
   })
 
+  // ---------------------------------------------------------------- sync ---
+  //
+  // The prerequisite for cloud sync, and the thing that blocked it: two devices
+  // must be able to hold a connection with the same name. Everything below is
+  // about that constraint being gone and change tracking taking its place.
+
+  check('an upgraded database loses the UNIQUE name constraints', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'smartcom-unique-'))
+    process.env.DB_PATH = join(dir, 'legacy.db')
+
+    // Build a database with the old schema by hand, as 1.6.1 would have left it.
+    const legacy = new Database(process.env.DB_PATH!)
+    legacy.exec(`
+      CREATE TABLE profiles (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        name TEXT NOT NULL UNIQUE,
+        host TEXT NOT NULL,
+        port INTEGER NOT NULL DEFAULT 22,
+        username TEXT NOT NULL,
+        auth_method TEXT NOT NULL CHECK (auth_method IN ('password', 'key', 'agent')),
+        key_path TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO profiles (id, name, host, username, auth_method)
+        VALUES ('keep-me', 'Core Router', '10.0.0.1', 'ops', 'password');
+    `)
+    legacy.close()
+
+    const upgraded = new DatabaseManager()
+    const schema = new Database(process.env.DB_PATH!)
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='profiles'")
+      .get() as { sql: string }
+
+    const survived = upgraded.getProfile('keep-me')
+    // The whole point: the same name, twice, from two different devices.
+    const second = upgraded.saveProfile(
+      ProfileSchema.parse({
+        name: 'Core Router',
+        host: '10.0.0.2',
+        username: 'ops',
+        authMethod: 'password',
+      })
+    )
+    const both = upgraded.listProfiles().filter((p) => p.name === 'Core Router').length
+    upgraded.close()
+
+    assert(!/NOT NULL UNIQUE/i.test(schema.sql), 'UNIQUE survived the rebuild')
+    assert(survived?.host === '10.0.0.1', 'existing connection lost in the rebuild')
+    assert(survived?.id === 'keep-me', 'id changed in the rebuild')
+    assert(second.id !== 'keep-me', 'second connection reused the first id')
+    assert(both === 2, `expected two connections named the same, got ${both}`)
+    return 'two "Core Router" connections coexist; existing row intact'
+  })
+
+  check('every write is tracked, and a delete leaves a tombstone', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'smartcom-sync-'))
+    process.env.DB_PATH = join(dir, 'sync.db')
+    const s = new DatabaseManager()
+
+    const profile = s.saveProfile(
+      ProfileSchema.parse({
+        name: 'Edge switch',
+        host: '10.9.9.9',
+        username: 'ops',
+        authMethod: 'password',
+      })
+    )
+
+    let pending = s.listLocalChanges()
+    const created = pending.find((c) => c.objectId === profile.id)
+    assert(created !== undefined, 'a new connection was not tracked')
+    assert(created!.type === 'profile', 'wrong type recorded')
+    assert(created!.deletedAt === null, 'a new connection looks deleted')
+    assert(created!.payload !== null, 'no payload for a live object')
+
+    // Accepting the push clears it.
+    s.markSynced([{ type: 'profile', objectId: profile.id!, revision: created!.revision }])
+    assert(
+      s.listLocalChanges().every((c) => c.objectId !== profile.id),
+      'still dirty after being marked synced'
+    )
+
+    // An edit makes it dirty again — INSERT OR REPLACE included, which is the
+    // path that would defeat a counter kept on the row itself.
+    s.saveProfile({ ...profile, host: '10.9.9.10' })
+    assert(
+      s.listLocalChanges().some((c) => c.objectId === profile.id),
+      'an edit was not tracked'
+    )
+
+    // The tombstone. Without this a delete here is undone by the next pull.
+    s.markSynced(
+      s.listLocalChanges().map((c) => ({ type: c.type, objectId: c.objectId, revision: c.revision }))
+    )
+    s.deleteProfile(profile.id!)
+    pending = s.listLocalChanges()
+    const tombstone = pending.find((c) => c.objectId === profile.id)
+    assert(tombstone !== undefined, 'a delete was not tracked')
+    assert(tombstone!.deletedAt !== null, 'a delete did not leave a tombstone')
+    assert(tombstone!.payload === null, 'a tombstone carried a payload')
+
+    s.close()
+    return 'create, edit and delete all tracked; tombstone survives the row'
+  })
+
+  check('applying a remote change does not bounce it back', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'smartcom-remote-'))
+    process.env.DB_PATH = join(dir, 'remote.db')
+    const s = new DatabaseManager()
+
+    // Nothing local, then a change arrives from the other laptop.
+    s.applyRemoteChange({
+      type: 'group',
+      objectId: 'grp-1',
+      revision: 4,
+      deletedAt: null,
+      updatedAt: new Date().toISOString(),
+      payload: { id: 'grp-1', name: 'Datacentre', sortOrder: 0 },
+    })
+
+    const group = s.listConnectionGroups().find((g) => g.id === 'grp-1')
+    assert(group?.name === 'Datacentre', 'remote group was not applied')
+    assert(
+      s.listLocalChanges().every((c) => c.objectId !== 'grp-1'),
+      'an applied remote change was queued straight back — devices would ping-pong forever'
+    )
+
+    // And a remote delete really deletes.
+    s.applyRemoteChange({
+      type: 'group',
+      objectId: 'grp-1',
+      revision: 5,
+      deletedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      payload: null,
+    })
+    assert(
+      s.listConnectionGroups().every((g) => g.id !== 'grp-1'),
+      'a remote delete did not remove the group'
+    )
+    assert(
+      s.listLocalChanges().every((c) => c.objectId !== 'grp-1'),
+      'an applied remote delete was queued back'
+    )
+
+    s.close()
+    return 'remote create and delete applied, neither echoed'
+  })
+
+  check('a macro whose set has not arrived yet is held, not lost', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'smartcom-order-'))
+    process.env.DB_PATH = join(dir, 'order.db')
+    const s = new DatabaseManager()
+
+    // Out of order on purpose: the macro references a set that is not here.
+    s.applyRemoteChange({
+      type: 'macro',
+      objectId: 'mac-1',
+      revision: 1,
+      deletedAt: null,
+      updatedAt: new Date().toISOString(),
+      payload: { id: 'mac-1', setId: 'set-1', name: 'Show version', steps: [] },
+    })
+    assert(s.getMacro('mac-1') === null, 'a macro was inserted with no set — foreign key violated')
+
+    s.applyRemoteChange({
+      type: 'macro_set',
+      objectId: 'set-1',
+      revision: 1,
+      deletedAt: null,
+      updatedAt: new Date().toISOString(),
+      payload: { id: 'set-1', name: 'Cisco', tags: [] },
+    })
+    s.applyRemoteChange({
+      type: 'macro',
+      objectId: 'mac-1',
+      revision: 1,
+      deletedAt: null,
+      updatedAt: new Date().toISOString(),
+      payload: { id: 'mac-1', setId: 'set-1', name: 'Show version', steps: [] },
+    })
+
+    assert(s.getMacro('mac-1')?.name === 'Show version', 'macro never landed after its set arrived')
+    s.close()
+    return 'orphan macro dropped, applied once its set existed'
+  })
+
+  check('the first sync of an existing install offers everything', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'smartcom-seed-'))
+    process.env.DB_PATH = join(dir, 'seed.db')
+    const s = new DatabaseManager()
+
+    s.saveProfile(
+      ProfileSchema.parse({ name: 'A', host: '1.1.1.1', username: 'x', authMethod: 'password' })
+    )
+    s.saveProfile(
+      ProfileSchema.parse({ name: 'B', host: '2.2.2.2', username: 'x', authMethod: 'password' })
+    )
+    s.markSynced(
+      s.listLocalChanges().map((c) => ({ type: c.type, objectId: c.objectId, revision: c.revision }))
+    )
+    assert(s.countLocalChanges() === 0, 'not clean before seeding')
+
+    s.markEverythingDirty()
+    const pending = s.countLocalChanges()
+    s.close()
+
+    assert(pending >= 2, `expected everything queued, got ${pending}`)
+    return `${pending} objects queued for a first push`
+  })
+
   console.log('\n===DB SMOKE===')
   results.forEach((line) => console.log(line))
   const failed = results.filter((r) => r.startsWith('FAIL')).length

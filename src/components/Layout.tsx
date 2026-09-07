@@ -14,6 +14,7 @@ import {
   SparklesIcon,
   MagnifyingGlassIcon,
   PencilSquareIcon,
+  CloudIcon,
 } from '@heroicons/react/24/outline'
 import type { ComponentType, SVGProps } from 'react'
 import { useStore, type SidePanel } from '../store/useStore'
@@ -26,6 +27,7 @@ import GlobalVariables from './GlobalVariables'
 import SettingsPanel from './SettingsPanel'
 import LogsViewer from './LogsViewer'
 import AboutDialog from './AboutDialog'
+import CloudAccountPanel from './CloudAccountPanel'
 import AssistantPanel from './AssistantPanel'
 import AssistantSettings from './AssistantSettings'
 import TldrPanel from './TldrPanel'
@@ -118,6 +120,20 @@ export default function Layout() {
   const setActiveDialog = useStore((state) => state.setActiveDialog)
   const isDetached = useStore((state) => state.isDetachedWindow)
   const theme = useStore((state) => state.theme)
+
+  /**
+   * The cloud button appears only once somebody has turned the account on.
+   *
+   * A permanent "Account" icon on a terminal that needs no account is an
+   * advertisement, and it would be advertising something that is not finished.
+   * Off, this row looks exactly as it did before the cloud existed.
+   */
+  const cloudState = useStore((state) => state.cloudState)
+  const loadCloudState = useStore((state) => state.loadCloudState)
+
+  useEffect(() => {
+    void loadCloudState()
+  }, [loadCloudState])
 
   const tldrRequest = useStore((state) => state.tldrRequest)
   const assistantPrefill = useStore((state) => state.assistantPrefill)
@@ -253,6 +269,22 @@ export default function Layout() {
                 >
                   <DocumentMagnifyingGlassIcon className="w-4 h-4" />
                 </button>
+                {cloudState?.enabled && (
+                  <button
+                    onClick={() => setActiveDialog('cloud')}
+                    title={
+                      cloudState.signedIn
+                        ? `SmartCom Cloud — ${cloudState.account?.user.email ?? 'signed in'}`
+                        : 'SmartCom Cloud — not signed in'
+                    }
+                    className={clsx(
+                      'p-1 rounded hover:bg-gray-700',
+                      cloudState.signedIn ? 'text-blue-400' : 'text-gray-400'
+                    )}
+                  >
+                    <CloudIcon className="w-4 h-4" />
+                  </button>
+                )}
                 <button
                   onClick={() => setActiveDialog('settings')}
                   title="Settings"
@@ -293,6 +325,7 @@ export default function Layout() {
       {activeDialog === 'scripts' && <ScriptLibrary onClose={() => setActiveDialog(null)} />}
       {activeDialog === 'globals' && <GlobalVariables onClose={() => setActiveDialog(null)} />}
       {activeDialog === 'about' && <AboutDialog onClose={() => setActiveDialog(null)} />}
+      {activeDialog === 'cloud' && <CloudAccountPanel onClose={() => setActiveDialog(null)} />}
       {showAssistantSettings && (
         <AssistantSettings onClose={() => setShowAssistantSettings(false)} />
       )}

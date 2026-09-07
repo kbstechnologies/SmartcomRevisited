@@ -502,6 +502,18 @@ export const SessionSchema = z.object({
   error: optionalText,
   /** Path of the active PuTTY-style session log, if logging is on. */
   logPath: optionalText,
+  /**
+   * How this session is connected, carried on the session rather than looked
+   * up from the profile.
+   *
+   * The renderer needs it to know whether SFTP is even possible, and the
+   * profile is the wrong place to ask: it can be edited or deleted while a
+   * session is still open, at which point the tab would start offering — or
+   * refusing — a transfer based on a connection it is no longer using.
+   *
+   * Optional so a session from an older main process still parses.
+   */
+  transport: z.enum(['ssh', 'serial', 'local']).optional(),
 })
 
 /** How terminals are arranged in the workspace. */
@@ -578,6 +590,41 @@ export const SettingsSchema = z.object({
   tldrUpdateIntervalDays: z.number().min(1).max(90).default(7),
   /** Starred commands, shown first in the Command Center. */
   tldrFavourites: z.array(z.string()).default([]),
+
+  // SmartCom Cloud (optional account)
+  /**
+   * Off, and it stays off until somebody turns it on.
+   *
+   * With this false the app contacts no SmartCom server at all and shows no
+   * account UI. That is the honest default rather than a cautious one: the
+   * subscription's headline feature is cross-device sync, which is not built,
+   * so an install that has never been asked has no business talking to an
+   * account service. Everything in the terminal is unaffected either way —
+   * nothing in the cloud may ever gate a session, a button or a script.
+   */
+  cloudEnabled: z.boolean().default(false),
+  /**
+   * Server root. Blank uses the hosted service. A self-hosted deployment
+   * points this at its own install; the stored credential is filed per host,
+   * so switching never hands one server another's token.
+   */
+  cloudBaseUrl: z.string().default(''),
+  /** How this machine is named in the account's device list. Blank uses the hostname. */
+  cloudDeviceName: z.string().default(''),
+  /**
+   * Synchronise connections, folders, button sets and buttons.
+   *
+   * Separate from `cloudEnabled` because signing in and synchronising are
+   * different decisions: somebody may want an account for the device list and
+   * billing without this machine's connections leaving it. Off means the
+   * account still works and nothing is uploaded.
+   *
+   * Scripts, global variables and every secret are **never** synchronised by
+   * this — see docs and `SYNC_TYPES`.
+   */
+  cloudSyncEnabled: z.boolean().default(false),
+  /** Minutes between automatic syncs. Zero means manual only. */
+  cloudSyncIntervalMinutes: z.number().min(0).max(1440).default(15),
 
   // Updates
   /** Look for a new release shortly after start-up. */

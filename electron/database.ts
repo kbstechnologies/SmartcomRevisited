@@ -22,6 +22,7 @@ import {
   FAVOURITES_SET_NAME,
   normaliseTags,
 } from '../src/shared/types'
+import type { SyncChange, SyncObjectType } from '../src/shared/cloud'
 import { remapBundle } from '../src/shared/button-sets'
 import { APP_NAME, DB_FILENAME } from '../src/shared/constants'
 
@@ -248,36 +249,202 @@ export class DatabaseManager {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
-      -- Create indexes
+      -- Change tracking for cloud sync. Kept in its own table rather than as
+      -- columns on each table, for two reasons that are not stylistic:
+      --
+      --  1. A tombstone cannot live in the row it describes. Deleting a
+      --     connection has to leave something behind saying it was deleted, or
+      --     the next pull from another device resurrects it.
+      --  2. saveProfile uses INSERT OR REPLACE, which is a DELETE followed by
+      --     an INSERT. A revision counter held on the row would reset to its
+      --     default on every save, and nothing would ever look changed.
+      --
+      -- A row is dirty when revision > synced_revision, which survives a crash
+      -- mid-sync without any extra bookkeeping.
+      CREATE TABLE IF NOT EXISTS sync_records (
+        type TEXT NOT NULL,
+        object_id TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        synced_revision INTEGER NOT NULL DEFAULT 0,
+        deleted_at DATETIME,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (type, object_id)
+      );
+
+      -- Where each workspace's pull left off, so a sync resumes rather than
+      -- re-reading everything.
+      CREATE TABLE IF NOT EXISTS sync_cursors (
+        workspace_id TEXT PRIMARY KEY,
+        cursor INTEGER NOT NULL DEFAULT 0,
+        last_sync_at DATETIME
+      );
+    `)
+
+    this.addMissingColumns()
+    this.repairAuditForeignKeys()
+    this.dropLegacyNameUniqueness()
+    this.createIndexesAndTriggers()
+  }
+
+  /**
+   * Indexes and triggers, in a method because dropping a table drops both.
+   *
+   * Everything here is `IF NOT EXISTS`, so it is safe to call after any table
+   * rebuild as well as on the ordinary start-up path.
+   */
+  private createIndexesAndTriggers() {
+    this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_macros_set_id ON macros(set_id);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_profile_id ON audit_logs(profile_id);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_macro_id ON audit_logs(macro_id);
+      CREATE INDEX IF NOT EXISTS idx_sync_records_dirty
+        ON sync_records(type, revision, synced_revision);
 
-      -- Create triggers for updated_at
-      CREATE TRIGGER IF NOT EXISTS profiles_updated_at 
+      -- Triggers for updated_at
+      CREATE TRIGGER IF NOT EXISTS profiles_updated_at
         AFTER UPDATE ON profiles BEGIN
         UPDATE profiles SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS macro_sets_updated_at 
+      CREATE TRIGGER IF NOT EXISTS macro_sets_updated_at
         AFTER UPDATE ON macro_sets BEGIN
         UPDATE macro_sets SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS macros_updated_at 
+      CREATE TRIGGER IF NOT EXISTS macros_updated_at
         AFTER UPDATE ON macros BEGIN
         UPDATE macros SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS settings_updated_at 
+      CREATE TRIGGER IF NOT EXISTS settings_updated_at
         AFTER UPDATE ON settings BEGIN
         UPDATE settings SET updated_at = CURRENT_TIMESTAMP WHERE key = NEW.key;
       END;
     `)
 
-    this.addMissingColumns()
-    this.repairAuditForeignKeys()
+    // Change tracking. Written as triggers rather than as calls inside every
+    // save method because there are a dozen write paths — import, SecureCRT
+    // import, the macro recorder, the copy dialog — and one that forgot to
+    // record a change would sync silently wrong data forever.
+    for (const [type, table] of [
+      ['profile', 'profiles'],
+      ['group', 'connection_groups'],
+      ['macro_set', 'macro_sets'],
+      ['macro', 'macros'],
+    ] as const) {
+      this.db.exec(`
+        CREATE TRIGGER IF NOT EXISTS ${table}_sync_insert AFTER INSERT ON ${table} BEGIN
+          INSERT INTO sync_records (type, object_id, revision, deleted_at, updated_at)
+          VALUES ('${type}', NEW.id, 1, NULL, CURRENT_TIMESTAMP)
+          ON CONFLICT(type, object_id) DO UPDATE SET
+            revision = sync_records.revision + 1,
+            deleted_at = NULL,
+            updated_at = CURRENT_TIMESTAMP;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS ${table}_sync_update AFTER UPDATE ON ${table} BEGIN
+          INSERT INTO sync_records (type, object_id, revision, deleted_at, updated_at)
+          VALUES ('${type}', NEW.id, 1, NULL, CURRENT_TIMESTAMP)
+          ON CONFLICT(type, object_id) DO UPDATE SET
+            revision = sync_records.revision + 1,
+            deleted_at = NULL,
+            updated_at = CURRENT_TIMESTAMP;
+        END;
+
+        -- The tombstone. This is the row that stops a delete on an offline
+        -- device from being undone by the next pull.
+        CREATE TRIGGER IF NOT EXISTS ${table}_sync_delete AFTER DELETE ON ${table} BEGIN
+          INSERT INTO sync_records (type, object_id, revision, deleted_at, updated_at)
+          VALUES ('${type}', OLD.id, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          ON CONFLICT(type, object_id) DO UPDATE SET
+            revision = sync_records.revision + 1,
+            deleted_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP;
+        END;
+      `)
+    }
+  }
+
+  /**
+   * Drops the `UNIQUE` constraint from the three name columns that carry one.
+   *
+   * This is the change that made cloud sync possible at all. `profiles.name`,
+   * `macro_sets.name` and `connection_groups.name` were each `NOT NULL UNIQUE`,
+   * so two people who both, reasonably, called a connection "Core Router" could
+   * never merge their data: pulling the other's row is an insert that violates
+   * the constraint, and there is no correct automatic answer — renaming
+   * somebody's connection behind their back is not one.
+   *
+   * Identity moves to the id, which was already a random 128-bit value rather
+   * than an autoincrement, so nothing else has to change.
+   *
+   * **De-duplication does not depend on this constraint** and never did:
+   * `importConnections` and `importMacroSets` check for a taken name with their
+   * own `SELECT` and rename to "… (imported)". That behaviour is unchanged, and
+   * it is the right kind of check — a courtesy to the person importing, not a
+   * rule the database enforces on data that arrived from their other laptop.
+   *
+   * SQLite cannot drop a column constraint in place, so each table is rebuilt.
+   * Rather than restate the schema — which would silently lose every column
+   * `addMissingColumns` has added over six releases — the current definition is
+   * read back from `sqlite_master` and edited.
+   */
+  private dropLegacyNameUniqueness() {
+    const tables = ['profiles', 'macro_sets', 'connection_groups'] as const
+
+    const definitionOf = (table: string): string | null =>
+      (
+        this.db
+          .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get(table) as { sql: string } | undefined
+      )?.sql ?? null
+
+    const needsRebuild = tables.filter((table) => {
+      const sql = definitionOf(table)
+      return sql !== null && /\bname\s+TEXT\s+NOT\s+NULL\s+UNIQUE\b/i.test(sql)
+    })
+
+    if (needsRebuild.length === 0) return
+
+    // Rebuilding is the riskiest thing this class does. Take a snapshot first
+    // if the version-change path has not already taken one.
+    if (!this.backupPath) {
+      this.backupPath = this.backupBeforeMigration(this.previousVersion ?? 'pre-sync')
+    }
+
+    this.db.pragma('foreign_keys = OFF')
+    try {
+      this.db.transaction(() => {
+        for (const table of needsRebuild) {
+          const sql = definitionOf(table)!
+          const columns = (
+            this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+          ).map((row) => `"${row.name}"`)
+
+          const rebuiltSql = sql
+            .replace(
+              new RegExp(`CREATE\\s+TABLE\\s+"?${table}"?`, 'i'),
+              `CREATE TABLE "${table}_rebuilt"`
+            )
+            .replace(/\bname\s+TEXT\s+NOT\s+NULL\s+UNIQUE\b/i, 'name TEXT NOT NULL')
+
+          this.db.exec(rebuiltSql)
+          this.db.exec(
+            `INSERT INTO "${table}_rebuilt" (${columns.join(', ')})
+             SELECT ${columns.join(', ')} FROM "${table}"`
+          )
+          this.db.exec(`DROP TABLE "${table}"`)
+          this.db.exec(`ALTER TABLE "${table}_rebuilt" RENAME TO "${table}"`)
+        }
+      })()
+    } finally {
+      this.db.pragma('foreign_keys = ON')
+    }
+
+    console.log(
+      `Dropped legacy UNIQUE name constraints on: ${needsRebuild.join(', ')} (cloud sync prerequisite)`
+    )
   }
 
   /**
@@ -1129,6 +1296,275 @@ export class DatabaseManager {
       settings[row.key] = JSON.parse(row.value_json)
     }
     return settings
+  }
+
+  // --- Cloud sync ------------------------------------------------------------
+  //
+  // The local database stays the source of truth. Everything here reads and
+  // writes it the way any other feature does; the cloud is a peer that is told
+  // what changed and asked what changed elsewhere. Nothing in this section is
+  // on the path of opening a session or running a button.
+
+  /**
+   * Local changes the server has not been told about yet.
+   *
+   * "Dirty" is `revision > synced_revision`, maintained by triggers, so a crash
+   * between pushing and recording the push leaves the change dirty and it goes
+   * again — at worst a redundant write, never a lost one.
+   *
+   * Order matters and is not alphabetical: a macro that arrives before its set
+   * has nowhere to go, and a profile that arrives before its folder loses its
+   * grouping. Parents first.
+   */
+  listLocalChanges(limit = 500): SyncChange[] {
+    const rows = this.db
+      .prepare(
+        `SELECT type, object_id, revision, deleted_at, updated_at
+           FROM sync_records
+          WHERE revision > synced_revision
+          ORDER BY CASE type
+                     WHEN 'group' THEN 0
+                     WHEN 'macro_set' THEN 1
+                     WHEN 'profile' THEN 2
+                     WHEN 'macro' THEN 3
+                     ELSE 4
+                   END,
+                   updated_at
+          LIMIT ?`
+      )
+      .all(limit) as Array<{
+      type: SyncObjectType
+      object_id: string
+      revision: number
+      deleted_at: string | null
+      updated_at: string
+    }>
+
+    return rows.map((row) => ({
+      type: row.type,
+      objectId: row.object_id,
+      revision: row.revision,
+      deletedAt: row.deleted_at,
+      updatedAt: row.updated_at,
+      // A tombstone carries no payload — there is nothing left to describe, and
+      // shipping the last known state of a deleted object would put it on the
+      // wire long after somebody asked for it to be gone.
+      payload: row.deleted_at ? null : this.syncPayload(row.type, row.object_id),
+    }))
+  }
+
+  /** Whether anything at all is waiting to go. Cheap enough to poll. */
+  countLocalChanges(): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS n FROM sync_records WHERE revision > synced_revision')
+      .get() as { n: number }
+
+    return row.n
+  }
+
+  /**
+   * Records that the server has accepted a change.
+   *
+   * The revision that was *pushed* is recorded, not the current one. If the
+   * object was edited again while the request was in flight, it stays dirty and
+   * goes on the next round — which is the whole reason a counter is used here
+   * rather than a boolean flag.
+   */
+  markSynced(entries: Array<{ type: SyncObjectType; objectId: string; revision: number }>): void {
+    const statement = this.db.prepare(
+      `UPDATE sync_records SET synced_revision = ?
+        WHERE type = ? AND object_id = ? AND synced_revision < ?`
+    )
+
+    this.db.transaction(() => {
+      for (const entry of entries) {
+        statement.run(entry.revision, entry.type, entry.objectId, entry.revision)
+      }
+    })()
+  }
+
+  /**
+   * Applies a change that came from another device.
+   *
+   * Marked clean immediately afterwards, in the same transaction. The triggers
+   * cannot tell a local edit from an applied remote one, so without this every
+   * pull would make the object dirty and push it straight back — two devices
+   * would trade the same row forever.
+   */
+  applyRemoteChange(change: SyncChange): void {
+    this.db.transaction(() => {
+      if (change.deletedAt) {
+        this.deleteForSync(change.type, change.objectId)
+      } else if (change.payload) {
+        this.upsertForSync(change.type, change.objectId, change.payload)
+      }
+
+      // The local revision is whatever the triggers just made it; clean means
+      // "we are not going to push this back".
+      this.db
+        .prepare(
+          `INSERT INTO sync_records (type, object_id, revision, synced_revision, deleted_at, updated_at)
+           VALUES (?, ?, 1, 1, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(type, object_id) DO UPDATE SET
+             synced_revision = sync_records.revision,
+             deleted_at = excluded.deleted_at`
+        )
+        .run(change.type, change.objectId, change.deletedAt ?? null)
+    })()
+  }
+
+  /** The current shape of an object, as the wire format sees it. */
+  private syncPayload(type: SyncObjectType, id: string): Record<string, unknown> | null {
+    switch (type) {
+      case 'group':
+        return (this.listConnectionGroups().find((group) => group.id === id) ??
+          null) as unknown as Record<string, unknown> | null
+      case 'profile':
+        return this.getProfile(id) as unknown as Record<string, unknown> | null
+      case 'macro_set':
+        return this.getMacroSet(id) as unknown as Record<string, unknown> | null
+      case 'macro':
+        return this.getMacro(id) as unknown as Record<string, unknown> | null
+      default:
+        return null
+    }
+  }
+
+  private upsertForSync(
+    type: SyncObjectType,
+    id: string,
+    payload: Record<string, unknown>
+  ): void {
+    // The id on the wire wins over anything in the payload: it is what the two
+    // sides agree the object *is*, and a payload carrying a different one would
+    // quietly fork the object into two.
+    const withId = { ...payload, id }
+
+    switch (type) {
+      case 'group':
+        this.saveConnectionGroup(withId as unknown as ConnectionGroup)
+        return
+
+      case 'profile':
+        this.saveProfile(withId as unknown as Profile)
+        return
+
+      case 'macro_set': {
+        // `saveMacroSet` UPDATEs when given an id, which does nothing at all if
+        // the set was created on the other device and has never been seen here.
+        if (this.getMacroSet(id) === null) {
+          const set = withId as unknown as MacroSet
+          this.db
+            .prepare(
+              'INSERT INTO macro_sets (id, name, description, color, tags) VALUES (?, ?, ?, ?, ?)'
+            )
+            .run(
+              id,
+              set.name,
+              set.description ?? null,
+              set.color ?? null,
+              JSON.stringify(normaliseTags(set.tags))
+            )
+          return
+        }
+        this.saveMacroSet(withId as unknown as MacroSet)
+        return
+      }
+
+      case 'macro': {
+        const macro = withId as unknown as Macro
+
+        // A macro whose set has not arrived yet would violate the foreign key.
+        // Dropping it is correct rather than lossy: the set is either in the
+        // same batch (parents are ordered first) or the change stays on the
+        // server and arrives on the next pull.
+        if (!macro.setId || this.getMacroSet(macro.setId) === null) return
+
+        if (this.getMacro(id) === null) {
+          this.saveMacroRow(macro)
+          return
+        }
+        this.saveMacro(macro)
+        return
+      }
+    }
+  }
+
+  private deleteForSync(type: SyncObjectType, id: string): void {
+    switch (type) {
+      case 'group':
+        this.deleteConnectionGroup(id)
+        return
+      case 'profile':
+        this.deleteProfile(id)
+        return
+      case 'macro_set':
+        this.deleteMacroSet(id)
+        return
+      case 'macro':
+        this.deleteMacro(id)
+        return
+    }
+  }
+
+  /** Where this workspace's last pull got to. */
+  getSyncCursor(workspaceId: string): number {
+    const row = this.db
+      .prepare('SELECT cursor FROM sync_cursors WHERE workspace_id = ?')
+      .get(workspaceId) as { cursor: number } | undefined
+
+    return row?.cursor ?? 0
+  }
+
+  setSyncCursor(workspaceId: string, cursor: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO sync_cursors (workspace_id, cursor, last_sync_at)
+         VALUES (?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(workspace_id) DO UPDATE SET
+           cursor = excluded.cursor, last_sync_at = CURRENT_TIMESTAMP`
+      )
+      .run(workspaceId, cursor)
+  }
+
+  getLastSyncAt(workspaceId: string): string | null {
+    const row = this.db
+      .prepare('SELECT last_sync_at FROM sync_cursors WHERE workspace_id = ?')
+      .get(workspaceId) as { last_sync_at: string | null } | undefined
+
+    return row?.last_sync_at ?? null
+  }
+
+  /**
+   * Marks everything as needing to be pushed.
+   *
+   * The first sync of an account that already has data, and the repair path
+   * when a workspace is re-linked. It does not touch the data itself.
+   */
+  markEverythingDirty(): number {
+    const seeded = this.db.transaction(() => {
+      let total = 0
+
+      for (const [type, table] of [
+        ['group', 'connection_groups'],
+        ['macro_set', 'macro_sets'],
+        ['profile', 'profiles'],
+        ['macro', 'macros'],
+      ] as const) {
+        total += this.db
+          .prepare(
+            `INSERT INTO sync_records (type, object_id, revision, synced_revision, updated_at)
+             SELECT '${type}', id, 1, 0, CURRENT_TIMESTAMP FROM ${table}
+             WHERE true
+             ON CONFLICT(type, object_id) DO UPDATE SET synced_revision = 0`
+          )
+          .run().changes
+      }
+
+      return total
+    })()
+
+    return seeded
   }
 
   close(): void {
