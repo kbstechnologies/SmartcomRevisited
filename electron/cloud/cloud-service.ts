@@ -228,13 +228,23 @@ export class CloudService extends EventEmitter {
 
   // ------------------------------------------------------------------- auth
 
-  async signIn(email: string, password: string): Promise<CloudState> {
+  /**
+   * `code` is the second factor, and it is optional because the client cannot
+   * know an account has two-factor enabled until it tries — the first request
+   * is *expected* to arrive without one and to be answered with
+   * `mfa-required`. The same field takes a recovery code: the server tries
+   * those first, so one box serves both and the operator does not have to know
+   * which kind they are holding.
+   */
+  async signIn(email: string, password: string, code?: string): Promise<CloudState> {
     if (!this.assertEnabled()) return this.getState()
 
     const baseUrl = this.baseUrl()
     await this.bindTo(baseUrl)
 
     return this.withBusy(async () => {
+      const trimmed = (code ?? '').trim()
+
       const response = await this.send('/api/v1/auth/login', {
         method: 'POST',
         body: {
@@ -244,6 +254,9 @@ export class CloudService extends EventEmitter {
           device_name: this.deviceName(),
           platform: this.options.platform,
           app_version: this.options.appVersion,
+          // Omitted rather than sent empty: the server validates it as
+          // nullable, and an empty string is a code that was never typed.
+          ...(trimmed === '' ? {} : { code: trimmed }),
         },
       })
 
@@ -639,6 +652,14 @@ export class CloudService extends EventEmitter {
       typeof payload.message === 'string'
         ? payload.message
         : this.firstValidationMessage(payload) ?? `The server returned ${response.status}.`
+
+    // Checked before the generic 401, because these two are the *same* status
+    // as a wrong password and mean something entirely different: the password
+    // was right and the sign-in is one step from finishing. Treating them as
+    // `auth` is what left the panel showing "enter the code from your
+    // authenticator app" beside no field to enter it in.
+    if (payload.error === 'mfa_required') return { kind: 'mfa-required', message }
+    if (payload.error === 'mfa_invalid') return { kind: 'mfa-invalid', message }
 
     if (response.status === 401) return { kind: 'auth', message }
     if (response.status === 403 && payload.error === 'account_suspended') {

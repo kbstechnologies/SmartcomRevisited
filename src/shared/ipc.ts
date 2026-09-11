@@ -439,7 +439,16 @@ export const IpcRequestSchema = z.discriminatedUnion('channel', [
   }),
   z.object({
     channel: z.literal('cloud:sign-in'),
-    data: z.object({ email: z.string().email(), password: z.string().min(1) }),
+    data: z.object({
+      email: z.string().email(),
+      password: z.string().min(1),
+      /**
+       * Two-factor code, or a recovery code — the server tries recovery first,
+       * so one field serves both. Absent on the first attempt, because the
+       * client cannot know the account needs one until the server says so.
+       */
+      code: z.string().max(64).optional(),
+    }),
   }),
   z.object({
     channel: z.literal('cloud:sign-out'),

@@ -203,3 +203,29 @@ jobs:
           files: release/latest-mac.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publishing is a job of its own, and it runs last on purpose.
+  #
+  # Every job above attaches with `draft: true`, so the release accumulates
+  # assets while it is still invisible. If those steps published directly, the
+  # first platform to finish would make the release public — and with it the
+  # `latest*.yml` update feeds — while the other platforms were still
+  # uploading. Installs would be offered an update whose files did not exist
+  # yet, and the macOS feed would describe one architecture until
+  # merge-mac-feed replaced it.
+  #
+  # Needing both jobs means the flip to public happens once, after every
+  # installer and the merged macOS feed are attached.
+  publish:
+    name: Publish the release
+    needs: [build, merge-mac-feed]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Publish
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

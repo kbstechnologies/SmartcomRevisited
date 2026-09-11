@@ -365,7 +365,7 @@ interface AppStore {
   cloudSaveSettings: (
     patch: Partial<{ enabled: boolean; baseUrl: string; deviceName: string }>
   ) => Promise<void>
-  cloudSignIn: (email: string, password: string) => Promise<void>
+  cloudSignIn: (email: string, password: string, code?: string) => Promise<void>
   cloudSignOut: (everywhere?: boolean) => Promise<void>
   cloudRefresh: () => Promise<void>
   cloudDevices: () => Promise<CloudDevice[]>
@@ -835,8 +835,8 @@ const useStore = create<AppStore>((set, get) => ({
 
   // Writes deliberately do *not* swallow: a failed sign-in has a message the
   // person typing needs to read, and the panel catches it to show it.
-  cloudSignIn: async (email, password) => {
-    set({ cloudState: await invoke<CloudState>('cloud:sign-in', { email, password }) })
+  cloudSignIn: async (email, password, code) => {
+    set({ cloudState: await invoke<CloudState>('cloud:sign-in', { email, password, code }) })
   },
 
   cloudSignOut: async (everywhere = false) => {

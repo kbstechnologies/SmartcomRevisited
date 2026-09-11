@@ -5,8 +5,9 @@ import {
   ComputerDesktopIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline'
+import { clsx } from 'clsx'
 import { useStore } from '../store/useStore'
-import type { CloudDevice } from '@shared/cloud'
+import { isMfaChallenge, type CloudDevice } from '@shared/cloud'
 
 /**
  * The SmartCom Cloud account panel.
@@ -59,6 +60,8 @@ export default function CloudAccountPanel({ onClose }: CloudAccountPanelProps) {
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  /** The second factor, or a recovery code — the server accepts either here. */
+  const [code, setCode] = useState('')
   const [working, setWorking] = useState(false)
   const [problem, setProblem] = useState('')
   const [devices, setDevices] = useState<CloudDevice[] | null>(null)
@@ -105,6 +108,20 @@ export default function CloudAccountPanel({ onClose }: CloudAccountPanelProps) {
 
   const busy = working || Boolean(state?.busy)
 
+  /**
+   * True while the server is waiting on a second factor. This is a *step*, not
+   * an error: the panel grows a field and asks again, rather than showing a red
+   * banner the operator cannot act on.
+   */
+  const challenge = Boolean(state && isMfaChallenge(state.error.kind))
+
+  // The code is answered once and thrown away. Keeping it would resubmit a used
+  // code on the next attempt, which the server refuses as a replay — the exact
+  // failure that looks like "the right code stopped working".
+  useEffect(() => {
+    if (!challenge) setCode('')
+  }, [challenge])
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
       <div className="bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col">
@@ -148,7 +165,7 @@ export default function CloudAccountPanel({ onClose }: CloudAccountPanelProps) {
               className="space-y-4"
               onSubmit={(event) => {
                 event.preventDefault()
-                void run(() => signIn(email.trim(), password))
+                void run(() => signIn(email.trim(), password, code))
               }}
             >
               <div>
@@ -189,13 +206,48 @@ export default function CloudAccountPanel({ onClose }: CloudAccountPanelProps) {
                 />
               </div>
 
+              {/* The second step. It appears only once the server has asked
+                  for it, because the client cannot know an account has
+                  two-factor enabled until it tries — so the first attempt is
+                  deliberately made without one. */}
+              {challenge && (
+                <div className="form-group">
+                  <label className="block text-sm text-gray-300 mb-1" htmlFor="cloud-mfa-code">
+                    Authenticator code
+                  </label>
+                  <input
+                    id="cloud-mfa-code"
+                    type="text"
+                    required
+                    autoFocus
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    spellCheck={false}
+                    placeholder="123456"
+                    value={code}
+                    onChange={(event) => setCode(event.target.value)}
+                    className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white font-mono tracking-widest"
+                  />
+                  <p
+                    className={clsx(
+                      'mt-1 text-xs',
+                      state.error.kind === 'mfa-invalid' ? 'text-amber-300' : 'text-gray-400'
+                    )}
+                  >
+                    {state.error.kind === 'mfa-invalid'
+                      ? `${state.error.message} A code can only be used once, so if you have just used this one, wait for the next.`
+                      : 'From your authenticator app. One of your recovery codes works here too.'}
+                  </p>
+                </div>
+              )}
+
               <div className="flex items-center gap-3">
                 <button
                   type="submit"
                   disabled={busy}
                   className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-white text-sm"
                 >
-                  {busy ? 'Signing in…' : 'Sign in'}
+                  {busy ? 'Signing in…' : challenge ? 'Verify code' : 'Sign in'}
                 </button>
                 {/* Registration is never proxied through the API: the terms,
                     the price and the email verification live on the website,
@@ -501,7 +553,7 @@ export default function CloudAccountPanel({ onClose }: CloudAccountPanelProps) {
           {/* The service's own diagnosis, which distinguishes the failures a
               panel cannot tell apart on its own. `auth` is already covered by
               the sign-in form appearing, so it is not repeated here. */}
-          {state && state.error.kind !== 'none' && state.error.kind !== 'disabled' && (
+          {state && state.error.kind !== 'none' && state.error.kind !== 'disabled' && !challenge && (
             <p
               className={`text-xs ${
                 state.error.kind === 'offline' ? 'text-gray-400' : 'text-amber-400'

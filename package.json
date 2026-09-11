@@ -131,20 +131,8 @@
     ],
     "mac": {
       "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
-          "target": "zip",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
+        "dmg",
+        "zip"
       ],
       "icon": "build/icon.png",
       "category": "public.app-category.utilities",
@@ -155,7 +143,7 @@
       "gatekeeperAssess": false
     },
     "dmg": {
-      "title": "Smartcom Revisited ${version}",
+      "title": "Smartcom Revisited ${version} ${arch}",
       "icon": "build/icon.png",
       "contents": [
         {

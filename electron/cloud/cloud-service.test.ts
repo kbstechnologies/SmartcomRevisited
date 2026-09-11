@@ -501,4 +501,104 @@ describe('CloudService', () => {
     expect(cloud.getState().billing).toBeNull()
     expect(cloud.getState().error.kind).toBe('none')
   })
+
+  // ------------------------------------------------------- the second factor
+
+  /**
+   * Two-factor sign-in, from the client's side.
+   *
+   * The shipped 1.7.0 client could not do this at all: it sent no code, and it
+   * turned the server's `mfa_required` into a plain 401, so the panel showed
+   * "enter the code from your authenticator app" with no field to enter it in
+   * and no way to finish. Every test here is that bug.
+   */
+  describe('two-factor', () => {
+    // The same shapes the existing sign-in tests use, so this exercises the
+    // real success path rather than an invented one.
+    const OK = { status: 200, body: { tokens: tokensBody('1') } }
+
+    it('reports a challenge as its own kind, not as a failed password', async () => {
+      server.on('/api/v1/auth/login', () => ({
+        status: 401,
+        body: { error: 'mfa_required', message: 'Enter the code from your authenticator app.' },
+      }))
+
+      const state = await build().signIn('nathan@example.test', 'hunter2')
+
+      // `auth` would be a wrong password, which this is not — the password was
+      // right and the sign-in is one step from done.
+      expect(state.error.kind).toBe('mfa-required')
+      expect(state.signedIn).toBe(false)
+    })
+
+    it('tells a wrong code apart from a first request for one', async () => {
+      server.on('/api/v1/auth/login', () => ({
+        status: 401,
+        body: { error: 'mfa_invalid', message: 'That code is not right.' },
+      }))
+
+      const state = await build().signIn('nathan@example.test', 'hunter2', '000000')
+
+      expect(state.error.kind).toBe('mfa-invalid')
+    })
+
+    it('sends the code it was given', async () => {
+      server.on('/api/v1/auth/login', () => OK)
+
+      await build().signIn('nathan@example.test', 'hunter2', '123456')
+
+      expect(server.calls[0].body.code).toBe('123456')
+    })
+
+    it('trims the code, because a pasted one arrives with spaces', async () => {
+      server.on('/api/v1/auth/login', () => OK)
+
+      await build().signIn('nathan@example.test', 'hunter2', '  123456 ')
+
+      expect(server.calls[0].body.code).toBe('123456')
+    })
+
+    it('omits the code entirely on a first attempt', async () => {
+      server.on('/api/v1/auth/login', () => OK)
+
+      await build().signIn('nathan@example.test', 'hunter2')
+
+      // Not sent as an empty string: the server validates it as nullable, and
+      // the first request is *expected* to arrive without one.
+      expect('code' in server.calls[0].body).toBe(false)
+    })
+
+    it('omits a code that is only whitespace', async () => {
+      server.on('/api/v1/auth/login', () => OK)
+
+      await build().signIn('nathan@example.test', 'hunter2', '   ')
+
+      expect('code' in server.calls[0].body).toBe(false)
+    })
+
+    it('signs in when the code is accepted', async () => {
+      server
+        .on('/api/v1/auth/login', () => OK)
+        .on('/api/v1/account', () => ({ status: 200, body: accountBody }))
+        .on('/api/v1/billing', () => ({ status: 404 }))
+
+      const state = await build().signIn('nathan@example.test', 'hunter2', '123456')
+
+      expect(state.signedIn).toBe(true)
+      expect(state.error.kind).toBe('none')
+    })
+
+    it('still reports an ordinary 401 as an auth failure', async () => {
+      // The guard must not swallow a genuinely wrong password.
+      server.on('/api/v1/auth/login', () => ({
+        status: 401,
+        body: { message: 'Those credentials do not match our records.' },
+      }))
+
+      const state = await build().signIn('nathan@example.test', 'wrong')
+
+      expect(state.error.kind).toBe('auth')
+    })
+  })
+
 })

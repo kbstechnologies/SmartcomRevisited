@@ -52,6 +52,7 @@ import type { SftpQueueState } from '../src/shared/sftp'
 import {
   CloudSettingsSchema,
   CLOUD_DEFAULT_BASE_URL,
+  isMfaChallenge,
   type CloudState,
   type SyncStatus,
 } from '../src/shared/cloud'
@@ -1986,22 +1987,39 @@ class SmartcomRevisitedApp {
           }
 
           case 'cloud:sign-in': {
-            const state = await this.cloud.signIn(request.data.email, request.data.password)
+            const state = await this.cloud.signIn(
+              request.data.email,
+              request.data.password,
+              request.data.code
+            )
+
+            // A two-factor challenge is an *unfinished* sign-in, not a failed
+            // one. Reporting it as a failure is what broke this: `invoke`
+            // throws on `success: false`, so the state carrying the challenge
+            // never reached the renderer and the panel could only show the
+            // message as an error — with no field to answer it.
+            const challenged = isMfaChallenge(state.error.kind)
 
             // A sign-in is a security event on this machine, and the audit log
             // is where an operator looks for those. The address is recorded
             // because it names the account; the password is not touched, and
             // no token is written anywhere near this log.
-            this.logAudit({
-              userMachine: this.userMachine,
-              sessionId: 'cloud',
-              macroName: 'SmartCom Cloud sign-in',
-              commands: [`sign-in ${request.data.email} → ${this.cloud.getState().baseUrl}`],
-              result: state.signedIn ? 'success' : 'error',
-              stderrSnippet: state.signedIn ? undefined : state.error.message,
-            })
+            //
+            // Written only once the sign-in resolves: a challenge is mid-flow,
+            // and logging it would put a row in the audit log for every code
+            // attempt rather than one for the sign-in.
+            if (!challenged) {
+              this.logAudit({
+                userMachine: this.userMachine,
+                sessionId: 'cloud',
+                macroName: 'SmartCom Cloud sign-in',
+                commands: [`sign-in ${request.data.email} → ${this.cloud.getState().baseUrl}`],
+                result: state.signedIn ? 'success' : 'error',
+                stderrSnippet: state.signedIn ? undefined : state.error.message,
+              })
+            }
 
-            return state.signedIn
+            return state.signedIn || challenged
               ? { success: true, data: state }
               : { success: false, error: state.error.message || 'Sign-in failed.' }
           }

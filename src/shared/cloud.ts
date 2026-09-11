@@ -216,7 +216,28 @@ export interface SyncStatus {
  * the stored refresh token is gone or revoked and only a sign-in fixes it;
  * `disabled` is not a failure at all.
  */
-export type CloudErrorKind = 'none' | 'disabled' | 'offline' | 'server' | 'auth' | 'suspended'
+/**
+ * `mfa-required` and `mfa-invalid` are not failures in the way the others are:
+ * they mean the sign-in is *unfinished*, and the panel answers them with a
+ * second field rather than a red banner. They are kept apart from each other
+ * because the wording and the state differ — the first is "we need a code",
+ * the second is "that code was wrong or already used", and showing the second
+ * on a first attempt reads as an accusation.
+ */
+export type CloudErrorKind =
+  | 'none'
+  | 'disabled'
+  | 'offline'
+  | 'server'
+  | 'auth'
+  | 'suspended'
+  | 'mfa-required'
+  | 'mfa-invalid'
+
+/** True while a sign-in is waiting on a second factor rather than broken. */
+export function isMfaChallenge(kind: CloudErrorKind): boolean {
+  return kind === 'mfa-required' || kind === 'mfa-invalid'
+}
 
 export interface CloudError {
   kind: CloudErrorKind
