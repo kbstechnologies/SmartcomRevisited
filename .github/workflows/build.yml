@@ -43,10 +43,30 @@ jobs:
           - os: macos-latest
             slug: macos-arm64
             name: macOS arm64 (dmg + zip)
-            command: >-
+            command: |
               npm run build
-              && npx electron-builder --mac zip --arm64 -p never
-              && npx electron-builder --mac dmg --arm64 -p never
+              npx electron-builder --mac zip --arm64 -p never
+              # The dmg is retried on its own. Three tagged builds produced three
+              # different hdiutil failures — a detach against the wrong volume, an
+              # eject refused as "Resource busy", and a create that died with
+              # ERR_ELECTRON_BUILDER_CANNOT_EXECUTE. The first two were real bugs
+              # and are fixed (one architecture per runner, dmg built alone). What
+              # is left is the runner: mounting and ejecting a disk image on a
+              # shared macOS VM is simply unreliable, and it fails differently
+              # each time. The zip above is the artifact the in-app updater uses,
+              # so a retry here only affects the human-facing download.
+              for attempt in 1 2 3; do
+                if npx electron-builder --mac dmg --arm64 -p never; then
+                  exit 0
+                fi
+                echo "::warning::dmg attempt $attempt failed; cleaning up and retrying"
+                for dev in $(hdiutil info | grep -o '^/dev/disk[0-9]*'); do
+                  hdiutil detach "$dev" -force || true
+                done
+                sleep 20
+              done
+              echo "::error::dmg failed three times"
+              exit 1
             artifacts: |
               release/*.dmg
               release/*.zip
@@ -57,10 +77,30 @@ jobs:
           - os: macos-15-intel
             slug: macos-x64
             name: macOS x64 (dmg + zip)
-            command: >-
+            command: |
               npm run build
-              && npx electron-builder --mac zip --x64 -p never
-              && npx electron-builder --mac dmg --x64 -p never
+              npx electron-builder --mac zip --x64 -p never
+              # The dmg is retried on its own. Three tagged builds produced three
+              # different hdiutil failures — a detach against the wrong volume, an
+              # eject refused as "Resource busy", and a create that died with
+              # ERR_ELECTRON_BUILDER_CANNOT_EXECUTE. The first two were real bugs
+              # and are fixed (one architecture per runner, dmg built alone). What
+              # is left is the runner: mounting and ejecting a disk image on a
+              # shared macOS VM is simply unreliable, and it fails differently
+              # each time. The zip above is the artifact the in-app updater uses,
+              # so a retry here only affects the human-facing download.
+              for attempt in 1 2 3; do
+                if npx electron-builder --mac dmg --x64 -p never; then
+                  exit 0
+                fi
+                echo "::warning::dmg attempt $attempt failed; cleaning up and retrying"
+                for dev in $(hdiutil info | grep -o '^/dev/disk[0-9]*'); do
+                  hdiutil detach "$dev" -force || true
+                done
+                sleep 20
+              done
+              echo "::error::dmg failed three times"
+              exit 1
             artifacts: |
               release/*.dmg
               release/*.zip
