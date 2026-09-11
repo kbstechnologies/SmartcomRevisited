@@ -43,7 +43,10 @@ jobs:
           - os: macos-latest
             slug: macos-arm64
             name: macOS arm64 (dmg + zip)
-            command: npm run build && npx electron-builder --mac --arm64 -p never
+            command: >-
+              npm run build
+              && npx electron-builder --mac zip --arm64 -p never
+              && npx electron-builder --mac dmg --arm64 -p never
             artifacts: |
               release/*.dmg
               release/*.zip
@@ -54,7 +57,10 @@ jobs:
           - os: macos-15-intel
             slug: macos-x64
             name: macOS x64 (dmg + zip)
-            command: npm run build && npx electron-builder --mac --x64 -p never
+            command: >-
+              npm run build
+              && npx electron-builder --mac zip --x64 -p never
+              && npx electron-builder --mac dmg --x64 -p never
             artifacts: |
               release/*.dmg
               release/*.zip
@@ -89,6 +95,20 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      # Spotlight indexes a disk image the moment it is mounted, and `mds_stores`
+      # then holds the device — which is why `hdiutil detach` could unmount the
+      # DMG volume but not eject it ("Resource busy"). Nothing on a build runner
+      # needs a search index. Also detaches anything already mounted, so a
+      # retried job does not inherit a volume from the attempt before it.
+      - name: Keep Spotlight off the disk images
+        if: runner.os == 'macOS'
+        run: |
+          sudo mdutil -a -i off || true
+          for dev in $(hdiutil info | awk '/^\/dev\/disk/ {print $1}'); do
+            echo "detaching stale $dev"
+            hdiutil detach "$dev" -force || true
+          done
 
       - name: Build installers
         run: ${{ matrix.command }}
