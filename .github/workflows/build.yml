@@ -38,9 +38,22 @@ jobs:
           # on a single host means electron-builder rebuilding better-sqlite3 and
           # @serialport/bindings-cpp for the *other* architecture, which is the
           # same cross-arch native rebuild that already forced Windows to x64
-          # only. macos-latest is Apple Silicon now, so the x64 half needs an
-          # Intel runner rather than cross-compilation.
-          - os: macos-latest
+          # only. Apple Silicon needs its own runner, and so does Intel.
+          #
+          # Pinned to macos-15 rather than macos-latest, and that is load-bearing.
+          # macos-latest has rolled forward to macOS 26, and electron-builder
+          # 24.13.3 predates it: the two runners report their own OS in the build
+          # log, and the pattern is exactly this —
+          #
+          #   x64   on os=24.6.0 (macOS 15)  dmg builds
+          #   arm64 on os=25.6.0 (macOS 26)  hdiutil dies CANNOT_EXECUTE
+          #
+          # It is intermittent rather than total — one tagged build did get a dmg
+          # out of macOS 26 — which is worse, because it looks like flakiness.
+          # Moving back to macOS 15 puts Apple Silicon on the same OS generation
+          # Intel already succeeds on. The real fix is a newer electron-builder,
+          # which is a decision of its own (see BUILD.md on Windows signing).
+          - os: macos-15
             slug: macos-arm64
             name: macOS arm64 (dmg + zip)
             command: |
@@ -53,10 +66,11 @@ jobs:
               #   split zip / dmg invocations    x64 passes
               #                                  arm64 fails CANNOT_EXECUTE
               #
-              # The x64 failure was a real race between the dmg and the zip. The
-              # arm64 one is deterministic — three identical retries — and only
-              # appears when the dmg is built by an invocation of its own. Do not
-              # "tidy" these two into the same command without checking both.
+              # The x64 failure was a real race between the dmg and the zip.
+              # The arm64 one is the runner's OS, not the command — see the
+              # macos-15 note above — but the shapes are kept as they are
+              # because this is the pairing both have passed with. Do not
+              # "tidy" them into one command without checking both runners.
               npm run build
               for attempt in 1 2 3; do
                 if npx electron-builder --mac --arm64 -p never; then
