@@ -44,28 +44,31 @@ jobs:
             slug: macos-arm64
             name: macOS arm64 (dmg + zip)
             command: |
+              # arm64 builds both targets in ONE electron-builder run, and x64
+              # splits them. That asymmetry is empirical, not principled, and it
+              # is the only combination in which both runners have ever passed:
+              #
+              #   one invocation, both targets   x64 fails "Resource busy"
+              #                                  arm64 passes
+              #   split zip / dmg invocations    x64 passes
+              #                                  arm64 fails CANNOT_EXECUTE
+              #
+              # The x64 failure was a real race between the dmg and the zip. The
+              # arm64 one is deterministic — three identical retries — and only
+              # appears when the dmg is built by an invocation of its own. Do not
+              # "tidy" these two into the same command without checking both.
               npm run build
-              npx electron-builder --mac zip --arm64 -p never
-              # The dmg is retried on its own. Three tagged builds produced three
-              # different hdiutil failures — a detach against the wrong volume, an
-              # eject refused as "Resource busy", and a create that died with
-              # ERR_ELECTRON_BUILDER_CANNOT_EXECUTE. The first two were real bugs
-              # and are fixed (one architecture per runner, dmg built alone). What
-              # is left is the runner: mounting and ejecting a disk image on a
-              # shared macOS VM is simply unreliable, and it fails differently
-              # each time. The zip above is the artifact the in-app updater uses,
-              # so a retry here only affects the human-facing download.
               for attempt in 1 2 3; do
-                if npx electron-builder --mac dmg --arm64 -p never; then
+                if npx electron-builder --mac --arm64 -p never; then
                   exit 0
                 fi
-                echo "::warning::dmg attempt $attempt failed; cleaning up and retrying"
+                echo "::warning::macOS arm64 attempt $attempt failed; cleaning up and retrying"
                 for dev in $(hdiutil info | grep -o '^/dev/disk[0-9]*'); do
                   hdiutil detach "$dev" -force || true
                 done
                 sleep 20
               done
-              echo "::error::dmg failed three times"
+              echo "::error::macOS arm64 failed three times"
               exit 1
             artifacts: |
               release/*.dmg
