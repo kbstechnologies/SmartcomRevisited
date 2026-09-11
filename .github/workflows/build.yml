@@ -82,7 +82,6 @@ jobs:
             name: macOS x64 (dmg + zip)
             command: |
               npm run build
-              npx electron-builder --mac zip --x64 -p never
               # The dmg is retried on its own. Three tagged builds produced three
               # different hdiutil failures — a detach against the wrong volume, an
               # eject refused as "Resource busy", and a create that died with
@@ -93,7 +92,11 @@ jobs:
               # each time. The zip above is the artifact the in-app updater uses,
               # so a retry here only affects the human-facing download.
               for attempt in 1 2 3; do
-                if npx electron-builder --mac dmg --x64 -p never; then
+                # dmg first, zip last: every run rewrites latest-mac.yml, and the
+                # feed has to end up describing the zip because macOS auto-update
+                # cannot install from a dmg. v1.7.0 shipped with an x64 feed
+                # listing only the dmg, which no Intel install could update from.
+                if npx electron-builder --mac dmg --x64 -p never                    && npx electron-builder --mac zip --x64 -p never; then
                   exit 0
                 fi
                 echo "::warning::dmg attempt $attempt failed; cleaning up and retrying"
