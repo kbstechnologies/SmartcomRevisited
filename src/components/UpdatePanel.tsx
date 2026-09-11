@@ -51,7 +51,12 @@ export default function UpdatePanel({ currentVersion }: { currentVersion: string
       case 'downloading':
         return `Downloading ${status.version}… ${status.percent}%`
       case 'ready':
-        return `Version ${status.version} is ready — restart to finish`
+        // The wording follows what the button will actually do. Saying
+        // "restart to finish" next to a button that opens a folder is the
+        // kind of small lie that makes people distrust the whole dialog.
+        return status.installerPath
+          ? `Version ${status.version} is downloaded — run the installer to finish`
+          : `Version ${status.version} is ready — restart to finish`
       case 'unsupported':
         return status.reason
       case 'error':
@@ -105,7 +110,7 @@ export default function UpdatePanel({ currentVersion }: { currentVersion: string
             onClick={() => void run('updates:install')}
             className="px-2 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-500"
           >
-            Restart and install
+            {status.installerPath ? 'Show the installer' : 'Restart and install'}
           </button>
         )}
 

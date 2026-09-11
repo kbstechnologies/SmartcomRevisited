@@ -14,9 +14,34 @@ export type UpdateStatus =
   | { state: 'current'; version: string }
   | { state: 'available'; version: string; canInstall: boolean; notes?: string }
   | { state: 'downloading'; version: string; percent: number }
-  | { state: 'ready'; version: string }
+  /**
+   * Downloaded and waiting. `installerPath` is set only when the person has to
+   * run it themselves — see `installsManually`.
+   */
+  | { state: 'ready'; version: string; installerPath?: string }
   | { state: 'error'; message: string }
   | { state: 'unsupported'; reason: string }
+
+/**
+ * True when the app downloads the update but leaves running it to the person.
+ *
+ * Windows builds are unsigned, so SmartScreen challenges the installer. When
+ * electron-updater launches it on quit, that challenge arrives detached from
+ * anything the person did — the app has closed, and a warning about an
+ * unrecognised publisher appears on its own. Half of them will click "Don't
+ * run", and the update silently never happens.
+ *
+ * Downloading and then showing them the file puts the challenge where it makes
+ * sense: they double-click an installer they asked for, see the warning, and
+ * choose. It is one more step and it is an honest one.
+ *
+ * **This goes away when the builds are signed** — it exists only because they
+ * are not. `deleteAppDataOnUninstall` means the installer must still be run as
+ * an upgrade rather than an uninstall/reinstall, which is what it does.
+ */
+export function installsManually(kind: PackageKind): boolean {
+  return kind === 'nsis'
+}
 
 export interface SelfUpdateSupport {
   /** True when the app can download a new version and swap itself for it. */

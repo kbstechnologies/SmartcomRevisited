@@ -1,6 +1,11 @@
 import { app, shell } from 'electron'
 import { RELEASES_URL } from '../src/shared/constants'
-import { selfUpdateSupport, type PackageKind, type UpdateStatus } from '../src/shared/updates'
+import {
+  installsManually,
+  selfUpdateSupport,
+  type PackageKind,
+  type UpdateStatus,
+} from '../src/shared/updates'
 
 /**
  * In-app updates.
@@ -85,7 +90,10 @@ export class UpdateService {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { autoUpdater } = require('electron-updater')
       autoUpdater.autoDownload = false // ask the user's setting first
-      autoUpdater.autoInstallOnAppQuit = true
+      // Off where the person runs the installer themselves: letting it fire on
+      // quit would launch an unsigned installer with no one watching, which is
+      // the SmartScreen prompt this avoids.
+      autoUpdater.autoInstallOnAppQuit = !installsManually(this.kind)
       autoUpdater.logger = null
 
       autoUpdater.on('update-available', (info: any) =>
@@ -107,7 +115,13 @@ export class UpdateService {
         })
       )
       autoUpdater.on('update-downloaded', (info: any) =>
-        this.set({ state: 'ready', version: info.version })
+        this.set({
+          state: 'ready',
+          version: info.version,
+          // Only carried when the person has to launch it, because that is the
+          // only case where anything needs the path.
+          installerPath: installsManually(this.kind) ? info.downloadedFile : undefined,
+        })
       )
       autoUpdater.on('error', (error: Error) =>
         this.set({ state: 'error', message: error?.message ?? String(error) })
@@ -168,10 +182,24 @@ export class UpdateService {
     return this.status
   }
 
-  /** Restarts into the downloaded version. Sessions are closed by the quit. */
+  /**
+   * Finishes the update.
+   *
+   * Where the build is signed this restarts into the new version. Where it is
+   * not — Windows today — it opens the folder with the downloaded installer
+   * selected and leaves it there. The app stays running: quitting first would
+   * put a SmartScreen warning on screen with nothing to explain it.
+   */
   install(): void {
     const updater = this.load()
     if (!updater || this.status.state !== 'ready') return
+
+    if (installsManually(this.kind)) {
+      const file = this.status.installerPath
+      if (file) shell.showItemInFolder(file)
+      return
+    }
+
     updater.quitAndInstall()
   }
 }
